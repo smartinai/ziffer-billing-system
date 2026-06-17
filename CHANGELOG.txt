@@ -1,0 +1,121 @@
+Ziffer Billing System - Changelog
+
+Use this file to track daily implementation progress for Teamwork.
+Add a new dated section whenever work continues on a new day.
+
+2026-06-17
+
+- Created the initial implementation plan in implementation_plan.txt.
+- Confirmed core product decisions:
+  - Users are internal Teamwork users only.
+  - Clients are Teamwork projects.
+  - Amounts are calculated from Teamwork user rates.
+  - Rates are reported in EUR.
+  - Archived/completed projects and deleted time entries are excluded.
+  - Temporary local login uses admin/admin.
+- Scaffolded the local app:
+  - React + Vite frontend.
+  - Node/Express backend.
+  - Shared reporting calculation module.
+  - Environment configuration files.
+  - Production build output.
+- Implemented temporary authentication:
+  - Login endpoint.
+  - Logout endpoint.
+  - Session check endpoint.
+  - HTTP-only local session cookie.
+- Implemented Teamwork integration:
+  - Basic-auth API client.
+  - Time entries fetch.
+  - People/users fetch.
+  - Projects fetch.
+  - Conservative page size.
+  - Page delay.
+  - Retry/backoff for transient errors and rate limits.
+  - In-memory report caching.
+  - Manual refresh endpoint.
+- Implemented data normalization:
+  - Internal-user filtering.
+  - Archived/completed/inactive project filtering.
+  - Deleted time-entry filtering.
+  - Teamwork user-rate normalization from minor units to EUR.
+  - Safe string handling for Teamwork fields that can return objects.
+- Implemented reporting calculations:
+  - Total hours.
+  - Billable hours.
+  - Billable percentage.
+  - Amounts from billable hours * user rate.
+  - Totals by project/client.
+  - Totals by user.
+  - Weekly trend data.
+  - Missing-rate metadata.
+  - Unknown user/project metadata.
+- Built the Ziffer-branded dashboard UI:
+  - Login screen.
+  - Overview tab.
+  - Users tab.
+  - Clients tab.
+  - Date presets: This month, Last month, Since Apr 1.
+  - Custom start/end date inputs.
+  - Manual refresh button.
+  - KPI cards.
+  - Billing trend chart.
+  - Top projects table.
+  - Top users table.
+  - User search.
+  - Client/project search.
+  - Teamwork sync status panel.
+  - Responsive desktop and mobile layouts.
+- Added verification coverage:
+  - Reporting math unit tests.
+  - Browser visual check script.
+  - Production build check.
+  - Production dependency audit.
+- Verified live Teamwork data for 2026-04-01 through 2026-06-17:
+  - 3,999.65 total hours.
+  - 2,451.22 billable hours.
+  - 61.3% billable.
+  - EUR 789,306.67 in calculated amounts.
+  - 8,295 time entries.
+  - 20 internal users.
+  - 92 active projects.
+  - 4 users missing rates.
+  - No partial API fetch flag.
+- Final checks completed:
+  - npm test passed.
+  - npm run build passed.
+  - npm audit --omit=dev found 0 production vulnerabilities.
+  - npm run test:visual passed.
+- Updated dashboard branding:
+  - Added the official Ziffer SVG logo from the public Ziffer site.
+  - Replaced the temporary Z mark in the login screen and app rail.
+  - Switched the dashboard accent system from temporary gold tones to Ziffer teal.
+  - Updated charts, navigation, KPI icons, status indicators, and primary action styling to match the Ziffer color scheme.
+  - Rebuilt and visually verified the branded dashboard on desktop and mobile.
+- Updated Teamwork data handling:
+  - Added persisted local Teamwork storage in data/teamwork-store.json.
+  - Ignored stored Teamwork JSON data from version control.
+  - Changed reporting so period selection filters stored data instead of fetching Teamwork for every selected period.
+  - Changed the refresh action into a full Teamwork storage sync from the default start date through today.
+  - Added stored-data coverage metadata to reports.
+  - Updated dashboard copy to show stored data status, last sync time, coverage range, and Sync Teamwork action.
+- Added Teamwork user profile pictures:
+  - Stored user avatar URLs during Teamwork user normalization.
+  - Passed avatar URLs through reporting rows.
+  - Displayed circular profile pictures before user names in the Overview top-users table and Users tab.
+  - Added initials fallback for users without profile pictures.
+- Renamed the reader-facing Users area to People:
+  - Sidebar tab now says People.
+  - Page heading now says People.
+  - Users tab title changed to People performance.
+  - Search placeholder changed to Search people.
+  - User table headers changed to Person.
+  - Overview table title changed from Top users to Top people.
+- Updated amount reporting labels and People tab:
+  - Changed dashboard-facing Money labels to Amounts.
+  - Added a People tab graph showing top billable amounts by person above the table.
+  - Kept the chart tied to stored report rows, so period changes do not trigger a new Teamwork fetch.
+- Prepared the app for private GitHub sync across computers:
+  - Added README setup instructions for new machines.
+  - Ignored visual check screenshots from version control.
+  - Verified real Teamwork credentials remain local-only in .env.

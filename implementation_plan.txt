@@ -1,0 +1,512 @@
+Ziffer Billing System - Implementation Plan
+Created: 2026-06-17
+
+1. Product goal
+
+Build a local-first reporting app for Ziffer that can later be deployed on a VPS.
+The first release connects to Teamwork, fetches time entries from 2026-04-01 onward,
+fetches all Teamwork users and projects, and presents reporting totals in a branded
+dashboard.
+
+Initial dashboard tabs:
+- Overview
+- Users
+- Clients
+
+Each tab must respect a user-selected reporting period.
+
+Core metrics:
+- Total hours
+- Billable hours
+- Money
+
+Money calculation for the first release:
+- Billable money = billable hours for a user * that user's Teamwork billing rate.
+- Non-billable entries contribute hours but not money.
+- Currency is always EUR for reporting.
+
+Confirmed product decisions:
+- Users means internal Teamwork users only.
+- Clients means Teamwork projects.
+- Money uses Teamwork user rates only.
+- Archived/completed projects are excluded.
+- Deleted time entries are excluded.
+- Rates are in EUR.
+- Add login protection before VPS deployment. For now, create a simple admin/admin
+  login for appearance and workflow only.
+- Teamwork can be sensitive to API limits, so requests should be deliberately
+  scaled down, cached, and retried carefully.
+
+2. Recommended local architecture
+
+Use a small full-stack JavaScript app:
+- Frontend: React + Vite
+- Backend: Node.js + Express
+- Charts/tables: Recharts or Tremor-style custom components; keep dependencies light.
+- No database for v1.
+
+Reasoning:
+- React + Vite is a good fit for an expandable dashboard UI.
+- A backend is needed so Teamwork credentials are never exposed in the browser.
+- The app can run locally now and move cleanly to a VPS later.
+- No DB keeps the first version simple; data can be fetched on demand and cached in memory.
+
+Proposed structure:
+
+src/
+  client/
+    App.jsx
+    components/
+    features/reporting/
+    styles/
+  server/
+    index.js
+    config.js
+    teamworkClient.js
+    reportingService.js
+    normalizers.js
+  shared/
+    reportingMath.js
+    dateRange.js
+
+If using a standard Vite template, keep the client at the project root and put the
+server in server/. The exact structure can be adjusted to the generated project.
+
+3. Environment configuration
+
+Create a local .env file, not committed:
+
+TEAMWORK_SITE_NAME=zifferlu.eu
+TEAMWORK_API_KEY=your-api-key
+TEAMWORK_AUTH_MODE=basic
+DEFAULT_START_DATE=2026-04-01
+DEFAULT_TIMEZONE=Europe/Amsterdam
+DEFAULT_CURRENCY=EUR
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=admin
+PORT=3000
+
+Teamwork authentication options:
+- Start with Basic auth for local development.
+- Teamwork documents Basic auth as an Authorization header containing a base64
+  encoded "{API_KEY or username}:password" value.
+- Keep OAuth 2.0 as a later production option if Ziffer wants a user login flow.
+
+Security rules:
+- Never send the Teamwork API key to the frontend.
+- Never log Authorization headers.
+- Add .env to .gitignore.
+- Validate all query params received by the backend before calling Teamwork.
+- Treat admin/admin as a temporary local-only credential and replace it before
+  any real VPS exposure.
+
+4. Teamwork API integration
+
+Use Teamwork.com API V3 where possible.
+
+Base host:
+https://{TEAMWORK_SITE_NAME}.teamwork.com
+
+Endpoints to implement:
+
+4.1 Time entries
+
+GET /projects/api/v3/time.json
+
+Useful query params:
+- startDate=YYYY-MM-DD
+- endDate=YYYY-MM-DD
+- page=1..n
+- pageSize=100 initially; increase only if Teamwork responds reliably
+- include=users,projects,projects.companies
+- returnBillableInfo=true
+- billableType=all
+- invoicedType=all
+- showDeleted=false
+
+Fields to request if sparse fields are used:
+- fields[timelogs]=id,dateCreated,minutes,description,timeLogged,billable,deleted,userId,projectId,taskId
+- fields[users]=id,firstName,lastName,email,userRate,userCost,deleted
+- fields[projects]=id,name,status,companyId,isBillable
+- fields[companies]=id,name
+
+Fetch from 2026-04-01 initially, but always allow the UI to pass a selected
+startDate and endDate.
+
+API-limit strategy:
+- Do not fetch a large all-time dataset on every dashboard load.
+- First fetch only the selected report range.
+- Default range remains 2026-04-01 through today, but changing the range should
+  trigger a range-specific cached fetch.
+- Use pageSize=100 to start, with a small delay between pages if Teamwork returns
+  rate-limit warnings or intermittent failures.
+- Retry 429 and transient 5xx responses with exponential backoff.
+- Stop after a clear max page count and return a readable partial/failed status
+  instead of looping indefinitely.
+
+4.2 People/users
+
+GET /projects/api/v3/people.json
+
+Useful query params:
+- page=1..n
+- pageSize=100 initially; increase only if Teamwork responds reliably
+- include=companies,currencies
+- showDeleted=false
+- includeClients=false
+- fields[people]=id,firstName,lastName,email,title,companyId,company,isClientUser,isServiceAccount,type,deleted,avatarUrl,userRate,userCost
+- fields[companies]=id,name
+
+The key field for money calculations is userRate.
+Only internal account users should be included in reporting.
+
+4.3 Projects
+
+GET /projects/api/v3/projects.json
+
+Useful query params:
+- page=1..n
+- pageSize=100 initially; increase only if Teamwork responds reliably
+- include=companies
+- projectType=normal
+- projectStatus=active if supported by the endpoint; otherwise filter inactive,
+  archived, and completed projects in our app
+- fields[projects]=id,name,type,status,company,companyId,updatedAt,isBillable
+- fields[companies]=id,name
+
+Use Teamwork projects to power the Clients tab. In v1, "client" means project.
+Companies can still be displayed as secondary metadata if available, but grouping
+and totals are by project.
+
+4.4 Pagination
+
+Implement one reusable fetchAllPages helper:
+- Start with page=1 and pageSize=100.
+- Continue while Teamwork meta.page.hasMore is true.
+- Also tolerate x-pages headers if present.
+- Protect against infinite loops with a max page limit and clear errors.
+- Add throttling/backoff controls:
+  - configurable page delay
+  - retry-after support
+  - exponential backoff for 429 and transient 5xx responses
+  - maximum retry count
+  - partial failure metadata for the UI
+
+5. Data normalization
+
+Normalize Teamwork responses into stable internal shapes.
+
+User:
+- id
+- name
+- email
+- companyId
+- userRate
+- userCost
+- isClientUser
+- isServiceAccount
+- deleted
+
+Internal user filtering:
+- Exclude client users.
+- Exclude service accounts if Teamwork marks them.
+- Exclude deleted users.
+
+Project:
+- id
+- name
+- companyId
+- companyName
+- status
+- isBillable
+
+Project filtering:
+- Exclude archived, completed, deleted, and inactive projects.
+- Keep status metadata in the normalized shape so the UI can explain exclusions
+  later if needed.
+
+Time entry:
+- id
+- date
+- minutes
+- hours
+- isBillable
+- userId
+- projectId
+- description
+- deleted
+
+Derived fields:
+- billableMinutes = isBillable ? minutes : 0
+- money = isBillable ? (minutes / 60) * user.userRate : 0
+
+Edge handling:
+- Missing userRate: calculate money as 0 and flag the user in a "missing rate" list.
+- Missing project: group under "Unknown project".
+- Missing user: group under "Unknown user".
+- Deleted time entries: exclude by default.
+- Archived/completed/inactive projects: exclude by default.
+- Negative/zero minutes: keep visible only if Teamwork returns them; mark clearly.
+
+6. Backend API for the frontend
+
+Expose local app endpoints:
+
+GET /api/reporting/summary?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
+
+Returns:
+- period
+- totals: hours, billableHours, money
+- byProject[]
+- byUser[]
+- byClient[]
+- metadata: fetchedAt, entryCount, missingRates[]
+
+GET /api/reporting/source-status
+
+Returns:
+- Teamwork connectivity status
+- last fetch time
+- user count
+- project count
+- latest time entry date
+
+Optional but useful:
+
+POST /api/reporting/refresh
+
+Forces a fresh Teamwork fetch instead of using in-memory cache.
+
+Caching approach:
+- Cache raw normalized users/projects/time entries in memory.
+- Cache key should include startDate and endDate.
+- Default TTL: 15 minutes during local development.
+- Add a manual refresh button in the UI.
+- Avoid file caching unless Teamwork rate limits or slow responses become a problem.
+- Use stale-while-refresh behavior if practical: show cached data immediately and
+  refresh in the background after the TTL expires.
+- Do not refresh all dashboard tabs separately; one summary endpoint should serve
+  Overview, Users, and Clients for the selected period.
+
+Authentication endpoint:
+
+POST /api/auth/login
+
+For v1:
+- username: admin
+- password: admin
+- create an HTTP-only local session cookie
+- add logout support
+- clearly isolate this as temporary local auth, not production-grade security
+
+7. Reporting calculations
+
+Shared function:
+buildReport({ users, projects, timeEntries, startDate, endDate })
+
+Steps:
+1. Filter time entries by selected date period using Europe/Amsterdam boundaries.
+2. Join entries to users and projects.
+3. Calculate per-entry:
+   - hours = minutes / 60
+   - billableHours = billable ? minutes / 60 : 0
+   - money = billableHours * userRate
+4. Aggregate:
+   - Overall totals
+   - Per project totals
+   - Per user totals
+   - Per client/project totals
+5. Sort:
+   - Overview top projects/users by money desc
+   - Users tab by money desc, then billable hours desc
+   - Clients tab by money desc, then billable hours desc
+
+Number formatting:
+- Hours: 2 decimals
+- Money: EUR with 2 decimals
+- Percent billable: billableHours / totalHours
+
+8. Dashboard UX
+
+Global app shell:
+- Ziffer logo/wordmark area
+- Top navigation with tabs: Overview, Users, Clients
+- Date period selector visible on every tab
+- Manual refresh control
+- Last updated timestamp
+
+Period selector:
+- Presets: This month, Last month, Since Apr 1, Custom
+- Default: 2026-04-01 through today's date
+- Custom: start date and end date inputs
+
+Overview tab:
+- KPI strip:
+  - Total hours
+  - Billable hours
+  - Billable percentage
+  - Money
+- Trend chart by week or day, depending on range length
+- Top projects table
+- Top users table
+- Data quality callout for missing rates, unknown users/projects, or failed refresh
+
+Users tab:
+- Search/filter users
+- Table columns:
+  - User
+  - Total hours
+  - Billable hours
+  - Billable percentage
+  - Billing rate
+  - Money
+  - Project count
+- User detail drawer or expandable row:
+  - Project breakdown for that user
+  - Recent time entries
+
+Clients tab:
+- Group by Teamwork project.
+- Table columns:
+  - Client/project
+  - Company, if available
+  - Total hours
+  - Billable hours
+  - Billable percentage
+  - Money
+- Client detail drawer or expandable row:
+  - User contribution breakdown
+  - Recent time entries
+
+Login screen:
+- Simple Ziffer-branded login screen.
+- Default local credentials: admin/admin.
+- Keep this intentionally basic in v1, but design the route/session boundary so
+  proper VPS authentication can replace it later.
+
+9. Branding direction from ziffer.lu
+
+Use the public Ziffer site as a visual reference:
+- Professional services tone.
+- Clean, understated, corporate layout.
+- Strong use of white space.
+- Serif or refined editorial heading feel paired with readable sans-serif UI text.
+- Neutral base palette with dark text, white/light backgrounds, and restrained accent colors.
+- Avoid playful SaaS styling, loud gradients, or decorative dashboard clutter.
+
+Brand content observed on ziffer.lu:
+- Company name: ZIFFER
+- Navigation tone: About Us, Services, Stories, Contacts
+- Positioning: family office and corporate partner in Luxembourg
+- Contact address: 4 Rue Jean Engling, 1466 Luxembourg
+
+Implementation note:
+- Before visual implementation, inspect the live site more deeply for logo, colors,
+  typography, and spacing. Reuse a legitimate logo asset only if licensing/ownership
+  is clear or if the asset is part of Ziffer's own materials available to this project.
+
+10. Development phases
+
+Phase 1 - Scaffold
+- Create React + Vite app.
+- Add Node/Express backend.
+- Add environment config loading.
+- Add dev scripts for client and server.
+- Add .gitignore entries for .env, logs, and local cache files.
+
+Phase 2 - Teamwork client
+- Build authenticated Teamwork HTTP client.
+- Build fetchAllPages helper.
+- Add conservative page sizing and retry/backoff handling.
+- Add range-specific fetching so the app does not repeatedly pull unnecessary
+  data from Teamwork.
+- Implement fetchUsers, fetchProjects, fetchTimeEntries.
+- Add clear error handling for 401/403/rate limits/network failures.
+- Add a local script or endpoint to test connectivity.
+
+Phase 3 - Normalization and math
+- Normalize users, projects, and time entries.
+- Implement reporting aggregation.
+- Add focused tests for:
+  - billable/non-billable money
+  - missing rates
+  - date range filtering
+  - project/user/client grouping
+
+Phase 4 - Backend reporting API
+- Implement /api/reporting/summary.
+- Implement /api/reporting/source-status.
+- Add in-memory caching and manual refresh.
+- Validate date query params.
+- Add temporary admin/admin login session.
+
+Phase 5 - Dashboard UI
+- Build login screen and authenticated dashboard shell.
+- Build app shell and tabs.
+- Build date selector.
+- Build KPI cards, charts, and tables.
+- Add loading, empty, error, and stale-data states.
+- Add responsive layout for laptop and mobile.
+
+Phase 6 - Branding pass
+- Apply Ziffer-inspired typography, spacing, colors, and logo treatment.
+- Keep the dashboard operational and restrained, not marketing-heavy.
+- Verify readable tables and controls at common screen sizes.
+
+Phase 7 - Verification
+- Run lint/build checks.
+- Run unit tests for reporting math.
+- Test Teamwork fetch with real credentials.
+- Compare sample totals against Teamwork's own report for the same period.
+- Test periods:
+  - 2026-04-01 through today
+  - current month
+  - a custom single week
+  - a range with no entries
+- Test users/projects with missing data.
+- Test Teamwork 429/rate-limit responses with mocked failures.
+- Test login/logout flow with admin/admin.
+
+Phase 8 - VPS readiness
+- Add production start script.
+- Add reverse proxy notes for Nginx/Caddy.
+- Add environment variable documentation.
+- Add basic health endpoint.
+- Decide later whether to add:
+  - persistent DB
+  - scheduled sync
+  - authentication for dashboard users
+  - export to CSV/PDF
+
+11. Confirmed decisions and remaining checks
+
+Confirmed:
+- Teamwork site name/subdomain: zifferlu.eu.
+- Users: internal only.
+- Clients: projects.
+- Money source: userRate only.
+- Archived/completed projects: excluded.
+- Deleted time entries: excluded.
+- Currency: EUR.
+- Login protection: yes; temporary admin/admin account for now.
+- Teamwork API usage: conservative page sizes, cached range requests, and backoff
+  for API limits.
+
+Remaining implementation checks:
+- Confirm Teamwork's exact status values for archived/completed projects in this
+  account and filter accordingly.
+- Confirm whether time entries connected to excluded projects should be hidden
+  entirely or shown under a separate excluded/archived section. Current decision:
+  hide them.
+- Confirm if there are any internal users with missing userRate before relying on
+  money totals.
+
+12. Sources checked
+
+- Ziffer public site: https://www.ziffer.lu/
+- Teamwork API documentation: https://apidocs.teamwork.com/
+- Teamwork authentication guide: https://apidocs.teamwork.com/guides/teamwork/authentication
+- Teamwork V3 paging guide: https://apidocs.teamwork.com/guides/teamwork/how-does-paging-work
+- Teamwork V3 time entries endpoint: https://apidocs.teamwork.com/docs/teamwork/v3/time-tracking/get-projects-api-v3-time-json
+- Teamwork V3 people endpoint: https://apidocs.teamwork.com/docs/teamwork/v3/people/get-projects-api-v3-people-json
+- Teamwork V3 projects endpoint: https://apidocs.teamwork.com/docs/teamwork/v3/projects/get-projects-api-v3-projects-json
