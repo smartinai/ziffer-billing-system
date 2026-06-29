@@ -7,9 +7,9 @@ Add a new dated section whenever work continues on a new day.
 
 - Created the initial implementation plan in implementation_plan.txt.
 - Confirmed core product decisions:
-  - Users are internal Teamwork users only.
-  - Clients are Teamwork projects.
-  - Amounts are calculated from Teamwork user rates.
+  - Internal Teamwork users are reported as people.
+  - Teamwork projects are reported as clients.
+  - Amounts are calculated from billed hours multiplied by Teamwork user rates.
   - Rates are reported in EUR.
   - Archived/completed projects and deleted time entries are excluded.
   - Temporary local login uses admin/admin.
@@ -42,30 +42,45 @@ Add a new dated section whenever work continues on a new day.
   - Safe string handling for Teamwork fields that can return objects.
 - Implemented reporting calculations:
   - Total hours.
-  - Billable hours.
-  - Billable percentage.
-  - Amounts from billable hours * user rate.
+  - Billed hours.
+  - Billed percentage.
+  - Amounts from billed hours multiplied by user rate.
   - Totals by project/client.
-  - Totals by user.
+  - Totals by person.
   - Weekly trend data.
   - Missing-rate metadata.
   - Unknown user/project metadata.
-- Built the Ziffer-branded dashboard UI:
+- Built the first Ziffer-branded dashboard UI:
   - Login screen.
   - Overview tab.
-  - Users tab.
+  - People tab.
   - Clients tab.
-  - Date presets: This month, Last month, Since Apr 1.
-  - Custom start/end date inputs.
+  - Date presets and custom date inputs.
   - Manual refresh button.
   - KPI cards.
   - Billing trend chart.
   - Top projects table.
-  - Top users table.
-  - User search.
+  - Top people table.
+  - People search.
   - Client/project search.
   - Teamwork sync status panel.
   - Responsive desktop and mobile layouts.
+- Updated dashboard branding:
+  - Added the official Ziffer SVG logo from the public Ziffer site.
+  - Replaced the temporary Z mark in the login screen and app rail.
+  - Switched the dashboard accent system from temporary gold tones to Ziffer teal.
+  - Updated charts, navigation, KPI icons, status indicators, and primary action styling.
+- Updated Teamwork data handling:
+  - Added persisted local Teamwork storage in data/teamwork-store.json.
+  - Ignored stored Teamwork JSON data from version control.
+  - Changed reporting so period selection filters stored data instead of fetching Teamwork for every selected period.
+  - Changed the refresh action into a full Teamwork storage sync from the default start date through today.
+  - Added stored-data coverage metadata to reports.
+- Added Teamwork user profile pictures:
+  - Stored user avatar URLs during Teamwork user normalization.
+  - Passed avatar URLs through reporting rows.
+  - Displayed circular profile pictures before person names.
+  - Added initials fallback for people without profile pictures.
 - Added verification coverage:
   - Reporting math unit tests.
   - Browser visual check script.
@@ -73,49 +88,82 @@ Add a new dated section whenever work continues on a new day.
   - Production dependency audit.
 - Verified live Teamwork data for 2026-04-01 through 2026-06-17:
   - 3,999.65 total hours.
-  - 2,451.22 billable hours.
-  - 61.3% billable.
+  - 2,451.22 billed hours.
+  - 61.3% billed.
   - EUR 789,306.67 in calculated amounts.
   - 8,295 time entries.
-  - 20 internal users.
+  - 20 internal people.
   - 92 active projects.
-  - 4 users missing rates.
+  - 4 people missing rates.
   - No partial API fetch flag.
-- Final checks completed:
-  - npm test passed.
-  - npm run build passed.
-  - npm audit --omit=dev found 0 production vulnerabilities.
-  - npm run test:visual passed.
-- Updated dashboard branding:
-  - Added the official Ziffer SVG logo from the public Ziffer site.
-  - Replaced the temporary Z mark in the login screen and app rail.
-  - Switched the dashboard accent system from temporary gold tones to Ziffer teal.
-  - Updated charts, navigation, KPI icons, status indicators, and primary action styling to match the Ziffer color scheme.
-  - Rebuilt and visually verified the branded dashboard on desktop and mobile.
-- Updated Teamwork data handling:
-  - Added persisted local Teamwork storage in data/teamwork-store.json.
-  - Ignored stored Teamwork JSON data from version control.
-  - Changed reporting so period selection filters stored data instead of fetching Teamwork for every selected period.
-  - Changed the refresh action into a full Teamwork storage sync from the default start date through today.
-  - Added stored-data coverage metadata to reports.
-  - Updated dashboard copy to show stored data status, last sync time, coverage range, and Sync Teamwork action.
-- Added Teamwork user profile pictures:
-  - Stored user avatar URLs during Teamwork user normalization.
-  - Passed avatar URLs through reporting rows.
-  - Displayed circular profile pictures before user names in the Overview top-users table and Users tab.
-  - Added initials fallback for users without profile pictures.
-- Renamed the reader-facing Users area to People:
-  - Sidebar tab now says People.
-  - Page heading now says People.
-  - Users tab title changed to People performance.
-  - Search placeholder changed to Search people.
-  - User table headers changed to Person.
-  - Overview table title changed from Top users to Top people.
-- Updated amount reporting labels and People tab:
-  - Changed dashboard-facing Money labels to Amounts.
-  - Added a People tab graph showing top billable amounts by person above the table.
-  - Kept the chart tied to stored report rows, so period changes do not trigger a new Teamwork fetch.
 - Prepared the app for private GitHub sync across computers:
   - Added README setup instructions for new machines.
   - Ignored visual check screenshots from version control.
   - Verified real Teamwork credentials remain local-only in .env.
+
+2026-06-18
+
+- Continued dashboard polish and reporting UX:
+  - Changed reader-facing copy from billable to billed where appropriate.
+  - Changed reader-facing copy from users to people.
+  - Switched the UI font to Poppins.
+  - Reduced oversized page headings.
+  - Kept dashboard cards white for a cleaner visual system.
+  - Removed the small stored-data status card and made the main chart full width.
+  - Improved topbar alignment and spacing.
+  - Improved table row spacing, fine row dividers, and numeric alignment.
+  - Removed decimals from the two top hour KPI cards only.
+- Updated period controls:
+  - Kept Last month and custom start/end date selectors.
+  - Removed This month and Since Apr 1 buttons.
+  - Added a month dropdown for months with available data.
+  - Ordered available months newest first.
+- Updated charting:
+  - Replaced the weekly billing trend with a yearly overview.
+  - Started the year overview in January.
+  - Showed monthly billed amounts.
+  - Restored the People amount chart to a horizontal bar chart.
+- Updated navigation:
+  - Made the left rail collapsible.
+  - Grouped Overview, People, and Clients under Billing.
+  - Added disabled eCDF and Performance items.
+  - Lightened the rail from the previous black treatment.
+- Added drilldown reporting:
+  - Clicking a project opens a card showing people involved with hours, billed hours, and amounts.
+  - Clicking a person opens a card showing projects worked on with hours, billed hours, and amounts.
+  - Made top project and top people rows clickable as well.
+- Updated table content:
+  - Removed the Company column from project/client reporting.
+  - Replaced "No company" with people and time-entry counts.
+  - Changed repeated "recent entries" labels to total time entries for the selected period.
+  - Filtered Teamwork projects whose names match people from all views.
+- Expanded real Teamwork reporting coverage:
+  - Pulled stored Teamwork data starting from 2026-01-01.
+  - Increased the local Teamwork page limit used by the running server for the larger sync.
+- Added a safe Netlify demo deployment:
+  - Added a separate mock-data demo mode for public users.
+  - Added fictional people, projects, and time entries only for demo builds.
+  - Added npm run build:demo.
+  - Added netlify.toml to build and publish the demo bundle.
+  - Disabled Teamwork sync in demo mode and changed the button to Demo data.
+  - Added .netlify/ to .gitignore.
+  - Deployed the safe demo to https://ziffer-billing-demo.netlify.app/.
+  - Verified the deployed demo has no login, no real Teamwork names, no Teamwork API dependency, and no console errors.
+  - Rebuilt and restarted the local app afterward so http://127.0.0.1:3000/ stays Teamwork-backed.
+- Final checks completed:
+  - npm test passed.
+  - npm run build passed.
+  - npm run build:demo passed.
+
+2026-06-29
+
+- Prepared the local app for a live-data demo:
+  - Checked GitHub sync status and confirmed origin/main still only has the initial dashboard commit.
+  - Rebuilt the normal local app bundle with npm run build.
+  - Restarted the local Express server on http://127.0.0.1:3000/.
+  - Refreshed stored Teamwork data from 2026-01-01 through 2026-06-29.
+  - Verified the Teamwork refresh completed with no partial API fetch flag.
+  - Confirmed the local app is running with Teamwork-backed data, not the Netlify mock-data demo.
+- Prepared GitHub sync for demoing on another computer:
+  - Raised the example Teamwork page cap to support the full 2026 year-to-date sync.
+  - Documented that a new computer needs its own .env credentials and a local Sync Teamwork run.

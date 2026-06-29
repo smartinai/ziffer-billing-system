@@ -34,6 +34,131 @@ test("calculates totals, billable hours, and money from user rates", () => {
   assert.equal(report.byProject.length, 2);
 });
 
+test("adds people breakdowns for each project", () => {
+  const report = buildReport({
+    endDate: "2026-04-30",
+    projects,
+    startDate: "2026-04-01",
+    timeEntries: [
+      { date: "2026-04-02", id: "1", isBillable: true, minutes: 120, projectId: "p1", userId: "u1" },
+      { date: "2026-04-03", id: "2", isBillable: false, minutes: 60, projectId: "p1", userId: "u1" },
+      { date: "2026-04-04", id: "3", isBillable: true, minutes: 30, projectId: "p1", userId: "u2" }
+    ],
+    users
+  });
+
+  const project = report.byProject[0];
+  assert.equal(project.peopleBreakdown.length, 2);
+  assert.equal(project.peopleBreakdown[0].name, "Ada");
+  assert.equal(project.peopleBreakdown[0].entryCount, 2);
+  assert.equal(project.peopleBreakdown[0].totals.hours, 3);
+  assert.equal(project.peopleBreakdown[0].totals.money, 400);
+  assert.equal(project.peopleBreakdown[1].name, "Ben");
+  assert.equal(project.peopleBreakdown[1].totals.hours, 0.5);
+  assert.equal(project.peopleBreakdown[1].totals.money, 75);
+});
+
+test("adds project breakdowns for each person", () => {
+  const report = buildReport({
+    endDate: "2026-04-30",
+    projects,
+    startDate: "2026-04-01",
+    timeEntries: [
+      { date: "2026-04-02", id: "1", isBillable: true, minutes: 120, projectId: "p1", userId: "u1" },
+      { date: "2026-04-03", id: "2", isBillable: false, minutes: 60, projectId: "p1", userId: "u1" },
+      { date: "2026-04-04", id: "3", isBillable: true, minutes: 30, projectId: "p2", userId: "u1" }
+    ],
+    users
+  });
+
+  const person = report.byUser[0];
+  assert.equal(person.name, "Ada");
+  assert.equal(person.projectCount, 2);
+  assert.equal(person.projectBreakdown.length, 2);
+  assert.equal(person.projectBreakdown[0].name, "Holding Structure");
+  assert.equal(person.projectBreakdown[0].entryCount, 2);
+  assert.equal(person.projectBreakdown[0].totals.hours, 3);
+  assert.equal(person.projectBreakdown[0].totals.money, 400);
+  assert.equal(person.projectBreakdown[1].name, "Residency");
+  assert.equal(person.projectBreakdown[1].entryCount, 1);
+  assert.equal(person.projectBreakdown[1].totals.hours, 0.5);
+  assert.equal(person.projectBreakdown[1].totals.money, 100);
+});
+
+test("keeps total entry counts separate from recent entry previews", () => {
+  const timeEntries = Array.from({ length: 9 }, (_, index) => ({
+    date: `2026-04-${String(index + 1).padStart(2, "0")}`,
+    id: `entry-${index + 1}`,
+    isBillable: true,
+    minutes: 30,
+    projectId: "p1",
+    userId: "u1"
+  }));
+
+  const report = buildReport({
+    endDate: "2026-04-30",
+    projects,
+    startDate: "2026-04-01",
+    timeEntries,
+    users
+  });
+
+  assert.equal(report.byProject[0].entryCount, 9);
+  assert.equal(report.byProject[0].recentEntries.length, 8);
+  assert.equal(report.byUser[0].entryCount, 9);
+  assert.equal(report.byUser[0].recentEntries.length, 8);
+});
+
+test("filters Teamwork projects whose names match people", () => {
+  const report = buildReport({
+    endDate: "2026-04-30",
+    projects: [
+      ...projects,
+      { id: "p3", name: "Jelena Balakleiska", companyName: "" }
+    ],
+    startDate: "2026-04-01",
+    timeEntries: [
+      { date: "2026-04-02", id: "1", isBillable: true, minutes: 60, projectId: "p1", userId: "u1" },
+      { date: "2026-04-03", id: "2", isBillable: true, minutes: 120, projectId: "p3", userId: "u1" }
+    ],
+    users: [
+      ...users,
+      { id: "u4", name: "Jelena Balakleiska", email: "jelena@ziffer.lu", userRate: 275 }
+    ]
+  });
+
+  assert.equal(report.totals.hours, 1);
+  assert.equal(report.totals.billableHours, 1);
+  assert.equal(report.totals.money, 200);
+  assert.deepEqual(report.byProject.map((project) => project.name), ["Holding Structure"]);
+  assert.deepEqual(report.byUser[0].projects, ["Holding Structure"]);
+  assert.deepEqual(report.metadata.filteredPersonProjects, [{ id: "p3", name: "Jelena Balakleiska" }]);
+  assert.equal(report.yearTrend[3].hours, 1);
+});
+
+test("builds a January to December billed amount trend for the selected year", () => {
+  const report = buildReport({
+    endDate: "2026-06-30",
+    projects,
+    startDate: "2026-04-01",
+    timeEntries: [
+      { date: "2025-12-31", id: "previous-year", isBillable: true, minutes: 60, projectId: "p1", userId: "u1" },
+      { date: "2026-01-15", id: "jan", isBillable: true, minutes: 60, projectId: "p1", userId: "u1" },
+      { date: "2026-04-02", id: "apr", isBillable: true, minutes: 120, projectId: "p1", userId: "u1" },
+      { date: "2026-05-02", id: "may", isBillable: false, minutes: 90, projectId: "p1", userId: "u1" }
+    ],
+    users
+  });
+
+  assert.equal(report.yearTrend.length, 12);
+  assert.deepEqual(report.yearTrend.map((row) => row.label).slice(0, 4), ["Jan", "Feb", "Mar", "Apr"]);
+  assert.equal(report.yearTrend[0].period, "2026-01");
+  assert.equal(report.yearTrend[0].money, 200);
+  assert.equal(report.yearTrend[3].money, 400);
+  assert.equal(report.yearTrend[4].money, 0);
+  assert.equal(report.totals.money, 400);
+});
+
 test("flags billable entries for users with missing rates", () => {
   const report = buildReport({
     endDate: "2026-04-30",

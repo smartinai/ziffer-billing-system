@@ -1,5 +1,6 @@
 node_modules/
 dist/
+.netlify/
 data/*.json
 qa-screenshots/
 .env

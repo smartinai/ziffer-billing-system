@@ -21,7 +21,7 @@ async function signIn(page) {
   page.on("pageerror", (error) => console.log(`pageerror:${error.message}`));
   await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
   await page.getByRole("button", { name: "Sign in" }).click();
-  await page.getByRole("heading", { name: "Billing overview" }).waitFor({ timeout: 120000 });
+  await page.getByRole("heading", { name: "Overview" }).waitFor({ timeout: 120000 });
   try {
     await page.getByText("Amounts").first().waitFor({ timeout: 120000 });
   } catch (error) {

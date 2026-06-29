@@ -34,7 +34,7 @@ export const config = {
   adminUsername: process.env.ADMIN_USERNAME || "admin",
   cacheTtlMs: Number(process.env.CACHE_TTL_MS || 15 * 60 * 1000),
   currency: process.env.DEFAULT_CURRENCY || "EUR",
-  defaultStartDate: process.env.DEFAULT_START_DATE || "2026-04-01",
+  defaultStartDate: process.env.DEFAULT_START_DATE || "2026-01-01",
   pageDelayMs: Number(process.env.TEAMWORK_PAGE_DELAY_MS || 200),
   pageSize: Number(process.env.TEAMWORK_PAGE_SIZE || 100),
   port: Number(process.env.PORT || 3000),

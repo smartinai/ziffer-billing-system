@@ -32,11 +32,14 @@ npm start
 
 7. Open `http://127.0.0.1:3000/`.
 
+8. Sign in with the local admin account and click `Sync Teamwork` before a live-data demo on a new computer. The first full sync can take a few minutes.
+
 ## Data Handling
 
 - `.env` is local only and must not be committed.
 - Stored Teamwork data lives in `data/teamwork-store.json` and is local only.
 - Use the dashboard's `Sync Teamwork` button to refresh stored Teamwork data on each computer.
+- GitHub contains the app code only, not Teamwork credentials or live Teamwork data.
 
 ## Checks
 

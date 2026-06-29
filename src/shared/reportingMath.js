@@ -7,6 +7,13 @@ function dateInRange(date, startDate, endDate) {
   return date >= startDate && date <= endDate;
 }
 
+function normalizeComparableName(value) {
+  return String(value || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
 function makeTotals() {
   return {
     billableHours: 0,
@@ -50,12 +57,32 @@ function weekKey(date) {
   return day.toISOString().slice(0, 10);
 }
 
+const monthLabels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+function makeYearTrend(year) {
+  return monthLabels.map((label, index) => ({
+    billableHours: 0,
+    hours: 0,
+    label,
+    money: 0,
+    month: index + 1,
+    period: `${year}-${String(index + 1).padStart(2, "0")}`,
+    year
+  }));
+}
+
 export function buildReport({ users = [], projects = [], timeEntries = [], startDate, endDate, currency = "EUR" }) {
   const usersById = new Map(users.map((user) => [String(user.id), user]));
   const projectsById = new Map(projects.map((project) => [String(project.id), project]));
+  const userNames = new Set(users.map((user) => normalizeComparableName(user.name)).filter(Boolean));
+  const filteredPersonProjects = projects.filter((project) => userNames.has(normalizeComparableName(project.name)));
+  const filteredPersonProjectIds = new Set(filteredPersonProjects.map((project) => String(project.id)));
   const byUser = new Map();
   const byProject = new Map();
+  const year = String(endDate || startDate).slice(0, 4);
   const trend = new Map();
+  const yearTrendRows = makeYearTrend(year);
+  const yearTrend = new Map(yearTrendRows.map((row) => [row.period, row]));
   const totals = makeTotals();
   const missingRateIds = new Set();
   const unknownUsers = new Set();
@@ -63,10 +90,17 @@ export function buildReport({ users = [], projects = [], timeEntries = [], start
   const includedEntries = [];
 
   for (const entry of timeEntries) {
-    if (!dateInRange(entry.date, startDate, endDate)) continue;
-
     const user = usersById.get(String(entry.userId));
     const project = projectsById.get(String(entry.projectId));
+
+    if (project && filteredPersonProjectIds.has(String(project.id))) continue;
+
+    if (entry.date?.startsWith(`${year}-`) && user && project) {
+      addTotals(yearTrend.get(entry.date.slice(0, 7)), entry, Number(user.userRate || 0));
+    }
+
+    if (!dateInRange(entry.date, startDate, endDate)) continue;
+
     if (!user) unknownUsers.add(entry.userId || "unknown");
     if (!project) unknownProjects.add(entry.projectId || "unknown");
     if (!user || !project) continue;
@@ -92,7 +126,18 @@ export function buildReport({ users = [], projects = [], timeEntries = [], start
     }
     const userRow = byUser.get(user.id);
     addTotals(userRow.totals, entry, userRate);
-    userRow.projects.set(project.id, project.name);
+    if (!userRow.projects.has(project.id)) {
+      userRow.projects.set(project.id, {
+        companyName: project.companyName,
+        entryCount: 0,
+        id: project.id,
+        name: project.name,
+        totals: makeTotals()
+      });
+    }
+    const userProjectRow = userRow.projects.get(project.id);
+    addTotals(userProjectRow.totals, entry, userRate);
+    userProjectRow.entryCount += 1;
     userRow.projectCount = userRow.projects.size;
     userRow.recentEntries.push({ ...entry, projectName: project.name });
 
@@ -108,7 +153,19 @@ export function buildReport({ users = [], projects = [], timeEntries = [], start
     }
     const projectRow = byProject.get(project.id);
     addTotals(projectRow.totals, entry, userRate);
-    projectRow.users.set(user.id, user.name);
+    if (!projectRow.users.has(user.id)) {
+      projectRow.users.set(user.id, {
+        avatarUrl: user.avatarUrl || "",
+        email: user.email,
+        entryCount: 0,
+        id: user.id,
+        name: user.name,
+        totals: makeTotals()
+      });
+    }
+    const projectPersonRow = projectRow.users.get(user.id);
+    addTotals(projectPersonRow.totals, entry, userRate);
+    projectPersonRow.entryCount += 1;
     projectRow.recentEntries.push({ ...entry, userName: user.name });
 
     const bucket = weekKey(entry.date);
@@ -116,18 +173,29 @@ export function buildReport({ users = [], projects = [], timeEntries = [], start
     addTotals(trend.get(bucket), entry, userRate);
   }
 
-  const byUserRows = sortedRows(byUser).map((row) => ({
-    ...row,
-    projects: [...row.projects.values()],
-    recentEntries: row.recentEntries.sort((a, b) => b.date.localeCompare(a.date)).slice(0, 8)
-  }));
+  const byUserRows = sortedRows(byUser).map((row) => {
+    const projectBreakdown = sortedRows(row.projects);
+    return {
+      ...row,
+      entryCount: row.recentEntries.length,
+      projectBreakdown,
+      projectCount: projectBreakdown.length,
+      projects: projectBreakdown.map((project) => project.name),
+      recentEntries: row.recentEntries.sort((a, b) => b.date.localeCompare(a.date)).slice(0, 8)
+    };
+  });
 
-  const byProjectRows = sortedRows(byProject).map((row) => ({
-    ...row,
-    recentEntries: row.recentEntries.sort((a, b) => b.date.localeCompare(a.date)).slice(0, 8),
-    userCount: row.users.size,
-    users: [...row.users.values()]
-  }));
+  const byProjectRows = sortedRows(byProject).map((row) => {
+    const peopleBreakdown = sortedRows(row.users);
+    return {
+      ...row,
+      entryCount: row.recentEntries.length,
+      peopleBreakdown,
+      recentEntries: row.recentEntries.sort((a, b) => b.date.localeCompare(a.date)).slice(0, 8),
+      userCount: peopleBreakdown.length,
+      users: peopleBreakdown.map((person) => person.name)
+    };
+  });
 
   return {
     byClient: byProjectRows,
@@ -136,6 +204,7 @@ export function buildReport({ users = [], projects = [], timeEntries = [], start
     currency,
     metadata: {
       entryCount: includedEntries.length,
+      filteredPersonProjects: filteredPersonProjects.map((project) => ({ id: project.id, name: project.name })),
       missingRates: [...missingRateIds].map((id) => usersById.get(id)).filter(Boolean),
       unknownProjects: [...unknownProjects],
       unknownUsers: [...unknownUsers]
@@ -144,6 +213,7 @@ export function buildReport({ users = [], projects = [], timeEntries = [], start
     totals: finalizeTotals(totals),
     trend: [...trend.values()]
       .map((row) => ({ ...row, ...finalizeTotals(row) }))
-      .sort((a, b) => a.period.localeCompare(b.period))
+      .sort((a, b) => a.period.localeCompare(b.period)),
+    yearTrend: yearTrendRows.map((row) => ({ ...row, ...finalizeTotals(row) }))
   };
 }

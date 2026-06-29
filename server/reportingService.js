@@ -124,7 +124,8 @@ export async function getReportingSummary(startDate, endDate) {
 }
 
 export async function refreshStoredReportingSummary(startDate, endDate) {
-  const store = await syncTeamworkStore();
+  const yearStartDate = `${String(endDate || startDate).slice(0, 4)}-01-01`;
+  const store = await syncTeamworkStore({ endDate, startDate: yearStartDate });
   return buildStoredReport(store, startDate, endDate);
 }
 
