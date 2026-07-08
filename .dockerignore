@@ -1,0 +1,13 @@
+node_modules
+dist
+.netlify
+.local-postgres
+data/*.json
+qa-screenshots
+.env
+.env.*
+npm-debug.log*
+*.log
+.git
+.gitignore
+README.md

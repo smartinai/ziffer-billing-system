@@ -27,6 +27,7 @@ test("calculates totals, billable hours, and money from user rates", () => {
   });
 
   assert.equal(report.totals.hours, 3.5);
+  assert.equal(report.totals.allMoney, 675);
   assert.equal(report.totals.billableHours, 2.5);
   assert.equal(report.totals.money, 475);
   assert.equal(report.byUser[0].name, "Ada");
@@ -52,6 +53,7 @@ test("adds people breakdowns for each project", () => {
   assert.equal(project.peopleBreakdown[0].name, "Ada");
   assert.equal(project.peopleBreakdown[0].entryCount, 2);
   assert.equal(project.peopleBreakdown[0].totals.hours, 3);
+  assert.equal(project.peopleBreakdown[0].totals.allMoney, 600);
   assert.equal(project.peopleBreakdown[0].totals.money, 400);
   assert.equal(project.peopleBreakdown[1].name, "Ben");
   assert.equal(project.peopleBreakdown[1].totals.hours, 0.5);
@@ -78,6 +80,7 @@ test("adds project breakdowns for each person", () => {
   assert.equal(person.projectBreakdown[0].name, "Holding Structure");
   assert.equal(person.projectBreakdown[0].entryCount, 2);
   assert.equal(person.projectBreakdown[0].totals.hours, 3);
+  assert.equal(person.projectBreakdown[0].totals.allMoney, 600);
   assert.equal(person.projectBreakdown[0].totals.money, 400);
   assert.equal(person.projectBreakdown[1].name, "Residency");
   assert.equal(person.projectBreakdown[1].entryCount, 1);
@@ -134,6 +137,29 @@ test("filters Teamwork projects whose names match people", () => {
   assert.deepEqual(report.byUser[0].projects, ["Holding Structure"]);
   assert.deepEqual(report.metadata.filteredPersonProjects, [{ id: "p3", name: "Jelena Balakleiska" }]);
   assert.equal(report.yearTrend[3].hours, 1);
+});
+
+test("excludes billing clients marked as excluded from all reporting totals", () => {
+  const report = buildReport({
+    endDate: "2026-04-30",
+    excludedProjectIds: ["p2"],
+    projects,
+    startDate: "2026-04-01",
+    timeEntries: [
+      { date: "2026-01-15", id: "before-period", isBillable: true, minutes: 60, projectId: "p2", userId: "u1" },
+      { date: "2026-04-02", id: "kept", isBillable: true, minutes: 60, projectId: "p1", userId: "u1" },
+      { date: "2026-04-03", id: "excluded", isBillable: true, minutes: 120, projectId: "p2", userId: "u1" }
+    ],
+    users
+  });
+
+  assert.equal(report.totals.hours, 1);
+  assert.equal(report.totals.billableHours, 1);
+  assert.equal(report.totals.money, 200);
+  assert.deepEqual(report.byProject.map((project) => project.id), ["p1"]);
+  assert.deepEqual(report.byUser[0].projects, ["Holding Structure"]);
+  assert.deepEqual(report.metadata.excludedProjects, [{ id: "p2", name: "Residency" }]);
+  assert.equal(report.yearTrend[0].hours, 0);
 });
 
 test("builds a January to December billed amount trend for the selected year", () => {

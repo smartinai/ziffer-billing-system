@@ -61,3 +61,141 @@ export function refreshSummary(range) {
   const params = new URLSearchParams(range);
   return request(`/api/reporting/refresh?${params}`, { method: "POST" });
 }
+
+export function getBillingClients() {
+  if (demoMode) {
+    return Promise.resolve({ clients: [] });
+  }
+  return request("/api/billing/clients");
+}
+
+export function getBillingQuotes() {
+  if (demoMode) {
+    return Promise.resolve({
+      quotes: [],
+      summary: {
+        avgPaidWithinDays: null,
+        outstandingAmount: 0,
+        totalPaidAmount: 0,
+        totalQuotes: 0,
+        totalSentAmount: 0,
+        totalTeamworkAfterAnnual: 0,
+        totalTeamworkEstimate: 0
+      }
+    });
+  }
+  return request("/api/billing/quotes");
+}
+
+export function getBillingQuoteDetail(id) {
+  if (demoMode) {
+    return Promise.resolve({ latestResponse: {}, lines: [], logs: [], payload: {}, quote: null });
+  }
+  return request(`/api/billing/quotes/${id}`);
+}
+
+export function syncBillingQuoteXeroStatus(id) {
+  if (demoMode) {
+    return Promise.resolve({ failed: 0, skipped: 0, synced: 0, total: 0 });
+  }
+  return request(`/api/billing/quotes/${id}/sync-xero-status`, { method: "POST" });
+}
+
+export function getXeroReference({ force = false } = {}) {
+  if (demoMode) {
+    return Promise.resolve({ accounts: [], contacts: [], taxRates: [] });
+  }
+  const params = new URLSearchParams();
+  if (force) params.set("force", "true");
+  const query = params.toString();
+  return request(`/api/xero/reference${query ? `?${query}` : ""}`);
+}
+
+export function getXeroStatus() {
+  if (demoMode) {
+    return Promise.resolve({ configured: false, connected: false, status: "demo" });
+  }
+  return request("/api/xero/status");
+}
+
+export function getAnnualInvoices(year) {
+  if (demoMode) {
+    return Promise.resolve({ clients: [], services: [], usage: [], year, years: [2025, 2026] });
+  }
+  const params = new URLSearchParams();
+  if (year) params.set("year", year);
+  return request(`/api/billing/annual-invoices?${params}`);
+}
+
+export function updateAnnualInvoiceUsage(input) {
+  if (demoMode) {
+    return Promise.resolve({ usage: { ...input, usageId: `${input.billingClientId}-${input.serviceId}-${input.year}` } });
+  }
+  return request("/api/billing/annual-invoices", {
+    body: JSON.stringify(input),
+    method: "PATCH"
+  });
+}
+
+export function updateBillingClient(id, client) {
+  if (demoMode) {
+    return Promise.resolve({ client: { ...client, id } });
+  }
+  return request(`/api/billing/clients/${id}`, {
+    body: JSON.stringify(client),
+    method: "PATCH"
+  });
+}
+
+export function createQuotePreview(input) {
+  if (demoMode) {
+    return Promise.resolve({ preview: null });
+  }
+  return request("/api/billing/quote-previews", {
+    body: JSON.stringify(input),
+    method: "POST"
+  });
+}
+
+export function updateQuotePreview(id, input) {
+  if (demoMode) {
+    return Promise.resolve({ preview: { ...input, id } });
+  }
+  return request(`/api/billing/quote-previews/${id}`, {
+    body: JSON.stringify(input),
+    method: "PATCH"
+  });
+}
+
+export function updateQuoteTimeEntryBillable(previewId, entryId, isBillable) {
+  if (demoMode) {
+    return Promise.resolve({ preview: null });
+  }
+  return request(`/api/billing/quote-previews/${previewId}/time-entries/${entryId}`, {
+    body: JSON.stringify({ isBillable }),
+    method: "PATCH"
+  });
+}
+
+export function sendQuoteToXero(previewId, input = {}) {
+  if (demoMode) {
+    const documentType = input.documentType === "draft_quote" ? "draft_quote" : "draft_invoice";
+    const documentLabel = documentType === "draft_quote" ? "draft quote" : "draft invoice";
+    return Promise.resolve({
+      preview: { id: previewId, status: "approved_for_xero" },
+      xero: {
+        annualUsageApplied: [],
+        documentLabel,
+        documentType,
+        lineCount: 0,
+        message: `Demo ${documentLabel} prepared.`,
+        mode: "prepared",
+        status: "prepared"
+      }
+    });
+  }
+  return request(`/api/billing/quote-previews/${previewId}/send-to-xero`, {
+    body: JSON.stringify(input),
+    method: "POST"
+  });
+}

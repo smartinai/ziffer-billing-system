@@ -1,0 +1,3 @@
+app.ziffer.lu {
+	reverse_proxy app:3000
+}

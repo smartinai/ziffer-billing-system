@@ -16,6 +16,7 @@ function normalizeComparableName(value) {
 
 function makeTotals() {
   return {
+    allMoney: 0,
     billableHours: 0,
     billablePercent: 0,
     hours: 0,
@@ -26,6 +27,7 @@ function makeTotals() {
 function finalizeTotals(totals) {
   return {
     ...totals,
+    allMoney: round(totals.allMoney),
     billableHours: round(totals.billableHours),
     billablePercent: totals.hours > 0 ? round((totals.billableHours / totals.hours) * 100, 1) : 0,
     hours: round(totals.hours),
@@ -37,6 +39,7 @@ function addTotals(target, entry, userRate) {
   const hours = entry.minutes / 60;
   const billableHours = entry.isBillable ? hours : 0;
   target.hours += hours;
+  target.allMoney += hours * userRate;
   target.billableHours += billableHours;
   target.money += billableHours * userRate;
 }
@@ -71,12 +74,22 @@ function makeYearTrend(year) {
   }));
 }
 
-export function buildReport({ users = [], projects = [], timeEntries = [], startDate, endDate, currency = "EUR" }) {
+export function buildReport({
+  users = [],
+  projects = [],
+  timeEntries = [],
+  startDate,
+  endDate,
+  currency = "EUR",
+  excludedProjectIds = []
+}) {
   const usersById = new Map(users.map((user) => [String(user.id), user]));
   const projectsById = new Map(projects.map((project) => [String(project.id), project]));
+  const excludedProjectIdSet = new Set(excludedProjectIds.map((id) => String(id)));
   const userNames = new Set(users.map((user) => normalizeComparableName(user.name)).filter(Boolean));
   const filteredPersonProjects = projects.filter((project) => userNames.has(normalizeComparableName(project.name)));
   const filteredPersonProjectIds = new Set(filteredPersonProjects.map((project) => String(project.id)));
+  const excludedProjects = projects.filter((project) => excludedProjectIdSet.has(String(project.id)));
   const byUser = new Map();
   const byProject = new Map();
   const year = String(endDate || startDate).slice(0, 4);
@@ -93,6 +106,7 @@ export function buildReport({ users = [], projects = [], timeEntries = [], start
     const user = usersById.get(String(entry.userId));
     const project = projectsById.get(String(entry.projectId));
 
+    if (excludedProjectIdSet.has(String(entry.projectId))) continue;
     if (project && filteredPersonProjectIds.has(String(project.id))) continue;
 
     if (entry.date?.startsWith(`${year}-`) && user && project) {
@@ -204,6 +218,7 @@ export function buildReport({ users = [], projects = [], timeEntries = [], start
     currency,
     metadata: {
       entryCount: includedEntries.length,
+      excludedProjects: excludedProjects.map((project) => ({ id: project.id, name: project.name })),
       filteredPersonProjects: filteredPersonProjects.map((project) => ({ id: project.id, name: project.name })),
       missingRates: [...missingRateIds].map((id) => usersById.get(id)).filter(Boolean),
       unknownProjects: [...unknownProjects],

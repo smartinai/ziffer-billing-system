@@ -167,3 +167,260 @@ Add a new dated section whenever work continues on a new day.
 - Prepared GitHub sync for demoing on another computer:
   - Raised the example Teamwork page cap to support the full 2026 year-to-date sync.
   - Documented that a new computer needs its own .env credentials and a local Sync Teamwork run.
+
+2026-06-30
+
+- Started invoice workflow planning:
+  - Reviewed the existing Google Apps Script billing workflow.
+  - Mapped Teamwork sync, quote draft, aggregation, annual invoice usage, and Xero push logic.
+  - Added INVOICE_INTEGRATION_PLAN.md with a phased migration plan and open questions for deciding the first invoice milestone.
+  - Updated the plan to use PostgreSQL from the start, with local development migrations and a clear path to migrate data to a VPS.
+  - Folded Marius's answers into the plan: Xero quotes only, direct aggregated quote preview, mandatory annual usage, PostgreSQL-backed storage, client mapping screen, standardized services, manual lines, audit logs, and hosted VPS direction.
+  - Reviewed the current Google Sheets workbook structure and mapped its tabs to future app screens and PostgreSQL tables.
+  - Recorded follow-up answers: annual data will come from Google Sheets export files, service labels are confirmed, services must be extendable, and annual usage balances should be admin-editable.
+- Started the PostgreSQL database foundation:
+  - Added the `pg` database driver.
+  - Added `docker-compose.yml` for a local PostgreSQL 16 database.
+  - Added `DATABASE_URL` and `DATABASE_SSL` to `.env.example`.
+  - Added `npm run db:migrate`.
+  - Added the first SQL migration for app users, roles, audit events, Teamwork sync data, billing clients, standardized services, annual invoice usage, quote previews, quote lines, Xero contacts, Xero tax rates, Xero quote logs, and Xero sync logs.
+  - Seeded the confirmed standardized services in the first migration.
+  - Added a database helper and `/api/health/db`.
+  - Kept the database optional so the existing JSON-backed reporting app still starts while invoice storage is introduced.
+  - Updated INVOICE_INTEGRATION_PLAN.md with checkboxes showing what is done and what is next.
+  - Verified migration discovery with `npm run db:migrate -- --dry-run`.
+  - Verified the existing test suite with `npm test`.
+  - Verified the production app bundle with `npm run build`.
+  - Restarted the local Express server on http://127.0.0.1:3000/ with the new database health route.
+  - Confirmed `/api/health/db` reports the expected no-database-configured state while PostgreSQL is not installed locally.
+  - Could not apply the migration locally yet because this computer does not currently have Docker or native PostgreSQL installed.
+- Unblocked the local database:
+  - Installed PostgreSQL 16 through winget.
+  - Detected existing PostgreSQL binaries and added a native local PostgreSQL fallback for machines without Docker.
+  - Added `npm run db:local:start`, `npm run db:local:status`, and `npm run db:local:stop`.
+  - Ignored `.local-postgres/` from version control.
+  - Started a project-local PostgreSQL database on port `55432`.
+  - Updated the ignored local `.env` with the database connection string without changing committed secrets.
+  - Applied `001_database_foundation.sql` successfully.
+  - Confirmed the database contains the first migration and the 6 standardized services.
+  - Restarted the local Express server and confirmed `/api/health/db` is connected to `ziffer_billing`.
+  - Updated `concurrently` within the current major version to clear the dev dependency audit finding.
+  - Confirmed `npm audit` reports 0 vulnerabilities.
+  - Re-ran `npm test` and `npm run build` successfully.
+  - Updated INVOICE_INTEGRATION_PLAN.md so the local migration is marked done and the next step is moving Teamwork sync writes into PostgreSQL.
+- Moved Teamwork sync writes into PostgreSQL:
+  - Added PostgreSQL persistence for Teamwork sync runs, people, projects, and time entries.
+  - Added `npm run db:import-teamwork-store` to import the existing local Teamwork JSON store into PostgreSQL without another Teamwork API call.
+  - Enriched Teamwork time-entry normalization with task ID, task name, tags, Teamwork invoice ID, source created timestamp, and source updated timestamp.
+  - Added tests for invoice-ready Teamwork normalization and billable/non-billable string handling.
+  - Imported the existing local Teamwork store into PostgreSQL.
+  - Ran a fresh full Teamwork sync for 2026-01-01 through 2026-06-30 with `TEAMWORK_MAX_PAGES=350`.
+  - Confirmed the fresh sync wrote 66 people, 104 projects, and 20,210 time entries into PostgreSQL.
+  - Confirmed the fresh sync fetched 206 pages with no partial API fetch flag.
+  - Confirmed 20,072 stored time entries include task data.
+  - Backfilled 154 Teamwork time entries with existing `projectBillingInvoiceId` values into `teamwork_invoice_id`.
+  - Restarted the local Express server and confirmed `/api/health/db` is connected.
+  - Re-ran `npm test`, `npm run build`, and `npm audit` successfully.
+  - Updated INVOICE_INTEGRATION_PLAN.md so Teamwork sync persistence is marked done and the next step is seeding billing clients from Teamwork projects.
+- Added the first billing settings UI:
+  - Moved the existing reporting views under Reporting.
+  - Renamed the reporting Clients view to Projects.
+  - Added Billing navigation with Create Quote, Quotes, and Clients.
+  - Added placeholders for Billing > Create Quote and Billing > Quotes.
+  - Added PostgreSQL-backed Billing > Clients seeded from Teamwork projects.
+  - Added a searchable Billing Clients table with Xero client, tax rate, discount, account code, and active status.
+  - Added a click-to-edit Billing Client modal for display name, Xero fields, tax fields, discount, account code, abbreviation, currency, and active status.
+  - Added `/api/billing/clients` list and update endpoints.
+  - Verified 104 billing clients are available from PostgreSQL.
+  - Verified optional Billing Client settings can be saved and cleared.
+  - Updated INVOICE_INTEGRATION_PLAN.md so billing client seeding and the client settings screen are marked done.
+  - Made the Reporting and Billing navigation groups collapsible.
+  - Seeded temporary Xero contact dropdown data from the current Google Sheet snapshot.
+  - Seeded 19 Xero tax rates from the current Google Sheet snapshot.
+  - Added `/api/xero/reference` for Billing Client dropdown data.
+  - Changed Billing Client modal labels: Display name is now Teamwork Project, Discount % is now Standard discount.
+  - Changed Xero client name to a dropdown.
+  - Changed tax rate name to a dropdown.
+  - Made Xero contact ID and tax type auto-fill from the selected dropdown values where the sheet snapshot has those IDs/types.
+  - Noted in INVOICE_INTEGRATION_PLAN.md that live Xero contact and tax-rate fetch must replace the temporary sheet snapshot.
+  - Changed Billing Clients rows to show quote counts instead of repeated Teamwork project names and time-entry counts.
+  - Made the full Billing Clients row clickable, with keyboard support, to open the client settings modal.
+  - Added active, inactive, and excluded statuses for billing clients.
+  - Added a currency dropdown with EUR, USD, GBP, and CHF options.
+  - Changed Standard discount to accept percent-style input such as 15 or 15%.
+  - Split Billing > Clients into active clients, a collapsed inactive clients card, and an excluded clients/projects card.
+  - Changed reporting so excluded billing clients/projects are omitted from overview totals, month trend, people, and project reporting.
+  - Applied the `002_billing_client_status.sql` migration locally.
+  - Made inactive and excluded client sections compact, collapsible controls with count labels and no repeated Billing eyebrow.
+  - Added discrete Billing > Clients summary cards for active, unmapped, inactive, and excluded clients.
+- Started the Create Quote workflow:
+  - Added shared quote preview logic for standardized service matching and Teamwork time aggregation.
+  - Added tests for service matching, aggregation, already-invoiced Teamwork entry exclusion, not-billed time warnings, zero-rate warnings, and missing mapping warnings.
+  - Added `POST /api/billing/quote-previews` to generate and persist quote previews and quote lines from stored PostgreSQL Teamwork time.
+  - Built Billing > Create Quote with active-client selection, date range selection, preview generation, totals cards, warning rows, and an aggregated quote line table.
+  - Verified the endpoint with KPS Holding S.A. for 2026-01-01 to 2026-06-30: 349 lines, 658.8 hours, 648.6834 billed hours, and EUR 367,840.54.
+  - Restarted the local server on http://127.0.0.1:3000/ and confirmed `/api/health/db` is connected to `ziffer_billing`.
+  - Re-ran `npm test`, `npm run build`, and browser QA successfully.
+  - Changed quote preview rows to aggregate by task name instead of by service and description.
+  - Renamed the first quote preview column from Service to Comment and left comment values blank for now.
+  - Added default-open collapsible drilldowns under each task row showing person, description, and time for every source Teamwork entry.
+  - Fixed quote preview table cell styling so row dividers run across the full row.
+  - Slimmed the Create Quote selector into a compact top control card.
+  - Renamed the quote generation action to Generate Quote.
+  - Hid missing-service warnings from the quote preview UI because most tasks will not need service mapping yet.
+  - Changed quote previews to default the reference to the previous month and the expiry date to 14 days after the quote date.
+  - Made quote reference, quote date, and expiry date editable and saved those metadata changes back to PostgreSQL.
+  - Corrected quote preview task grouping to use Teamwork task identity, with the visible task name as the main row.
+  - Shifted the source time-entry drilldown so person, description, and time sit underneath the task name column rather than under the blank comment column.
+  - Centered quote warning row content so labels and messages align cleanly.
+  - Aligned source time-entry drilldown rows to the parent quote table so entry time sits under the main Hours column.
+  - Fixed the quote task disclosure icon so task names and their expanded source entries align inside the Task name column.
+  - Added blank per-entry comment cells to quote source time-entry drilldowns for future comment handling.
+
+2026-07-01
+
+- Improved the Create Quote client picker:
+  - Replaced the long client dropdown with a searchable client picker.
+  - Added filtered client results with click-to-select and Enter-to-select behavior.
+  - Kept quote generation disabled while typed search text does not match the selected client.
+- Refined quote preview line editing:
+  - Changed mixed-rate quote lines to show the weighted average rate instead of `Mixed`.
+  - Made quote line discounts editable and persisted the recalculated line amount and preview total.
+  - Removed the quote line Warnings column so warnings can move into comments later.
+  - Clarified the missing-person-rate warning copy.
+  - Moved the draft quote number into the editable quote metadata row.
+  - Added person rates to the source time-entry drilldown rows.
+  - Preserved the selected Reporting/Billing page across browser refreshes.
+  - Removed the existing-preview warning so Generate Quote always creates a fresh draft without duplicate-warning noise.
+  - Checked the Google Sheet `Time Data` tab and confirmed unbillable source rows are stored as `Billable = FALSE` with zero totals.
+  - Split quote preview task aggregation by billable state so billable and unbillable entries from the same task appear as separate rows.
+  - Added `Marked unbillable` comments to unbillable task rows and source-entry rows.
+  - Added an icon-only action on unbillable source time entries to mark them billable and rebuild the draft aggregation.
+  - Added a preview-level backend override event for billable-state changes without changing the imported Teamwork source data.
+- Started annual invoice management:
+  - Added Billing > Annual Invoices with year tabs for 2025 and 2026.
+  - Added a PostgreSQL-backed annual invoice API for listing active clients, annual services, and per-client annual/used hours.
+  - Added editable annual-hours and used-hours cells for every active client and annual invoice service.
+  - Added per-cell save actions so annual and used hours are persisted together.
+  - Removed repeated annual/used wording from the service headers and made the annual invoice table header sticky while scrolling.
+  - Added the annual-invoice client allowlist migration: 50 listed projects stay active and all other billing clients are marked excluded.
+  - Added `npm run db:import-annual-invoices` for importing annual invoice balances from a Google Sheets workbook export.
+  - Imported the 2025 and 2026 Annual invoices sheet data into PostgreSQL for active clients only, skipping excluded projects.
+  - Imported 185 annual invoice cells: 109 for 2025 and 76 for 2026.
+  - Applied annual invoice balances to quote previews.
+  - Matching billable annual-service task rows are now marked as covered by annual invoice, shown with annual usage comments, excluded from Xero quote amount, and counted in annual-covered hours.
+- Added the first Send to Xero approval step:
+  - Added a Send to Xero button to the draft quote header.
+  - Sending approves annual-covered hours into annual invoice usage and writes annual usage audit events.
+  - Sending converts every billable quote line into a Xero-ready payload and excludes lines marked unbillable.
+  - Annual-covered billable lines are included in the stored Xero payload with zero amount so their approved hours remain traceable without charging again.
+  - Stored a prepared Xero quote row and outbound Xero sync log with quote number, amount, line count, idempotency key, payload, and response note.
+  - Locked sent quote previews so metadata, discounts, and unbillable overrides cannot be edited afterward.
+  - Added backend duplicate-send protection for quote previews that were already approved or prepared.
+  - Noted in INVOICE_INTEGRATION_PLAN.md that this is a prepared/local approval step only until live Xero OAuth and API transport are implemented.
+- Prepared Billing > Quotes as the sent-to-Xero quote ledger:
+  - Added stored quote metrics for initial Teamwork estimate without unbillable time, Teamwork estimate after annual invoice coverage, amount sent to Xero, amount paid in Xero, paid date, and paid-within-days.
+  - Added a Billing > Quotes API and UI with summary cards and a ledger table.
+  - Added a local migration for the new Xero quote metric fields.
+  - Added `npm run db:seed-mock-quotes` to create mock sent-to-Xero quote rows from real stored Teamwork data.
+  - Seeded three mock quote rows: two mock paid quotes and one mock open quote.
+  - Updated INVOICE_INTEGRATION_PLAN.md so live Xero payment sync-back remains the next integration step for paid status.
+- Refined annual invoice editing:
+  - Changed blank Annual hours to mean no annual coverage, so matching quote lines remain invoiceable unless a positive annual allowance exists.
+  - Removed the per-cell save buttons from Billing > Annual Invoices.
+  - Added autosave for Annual and Used hour cells with a compact Saving/Saved notice next to the year tabs.
+  - Updated the annual invoice importer to support the live `Annual Invoices` Google Sheet export with separate `Invoiced` and `Used` tabs.
+  - Re-imported 600 annual invoice cells from the live workbook: 300 for 2025 and 300 for 2026.
+  - Used-hours balances now come from the `Used` tab, with 119 populated used cells for 2025 and 18 populated used cells for 2026 in the local database.
+  - Added a quote preview annual coverage panel showing how many hours were used before, how many the current quote will consume, and how many remain.
+  - Added the same annual coverage breakdown to annual-covered task rows so reviewers can see why a line is booked against annual invoices instead of billed to Xero.
+  - Polished annual-covered quote rows so used-before, this-quote, and remaining balances display as three separate metric blocks instead of one cramped line.
+  - Removed the row-level annual coverage breakdown again and kept the detailed balance only in the top quote summary.
+  - Renamed annual-covered quote row and source-entry tags to `pre-paid`.
+  - Redesigned the top annual coverage summary so each service uses the full row with separate used-before, this-quote, and remaining metric blocks.
+- Refined billable/unbillable quote controls:
+  - Added a far-right three-dot action menu to every quote task row and every source time-entry row.
+  - Added `Mark unbillable` as the only current menu action.
+  - Marking an individual time entry as unbillable now rebuilds the draft so that entry moves into a separate `Marked unbillable` task row below the billable task row.
+  - Marking a task row as unbillable applies the override to all billable source entries in that task row.
+  - Fixed the backend quote-status check for time-entry billable overrides so the quote preview status is not confused with the billing client status.
+- Prepared the real Xero quote payload shape:
+  - Reworked the prepared payload from an internal camelCase object into the Xero Accounting API quote request envelope: `PUT /Quotes` with `Quotes`, `Contact`, `QuoteNumber`, `Reference`, `Date`, `ExpiryDate`, `Status`, `CurrencyCode`, `LineAmountTypes`, and `LineItems`.
+  - Added Xero line item fields for description, quantity, unit amount, line amount, discount rate, account code, and tax type.
+  - Kept unbillable rows excluded from Xero and kept pre-paid annual rows in the payload as zero-amount trace lines.
+  - Stored transport headers in the prepared sync-log payload, including idempotency key and the future Xero tenant ID placeholder.
+  - Added a focused unit test for the Xero quote payload field mapping.
+
+2026-07-02
+
+- Wired the first live Xero transport:
+  - Added Xero OAuth configuration keys to `.env.example`.
+  - Added Xero connection status, OAuth connect, OAuth callback, and disconnect routes.
+  - Added encrypted local token storage using the existing `xero_connections` table.
+  - Added Xero access-token refresh and tenant selection logic.
+  - Set the default OAuth scopes to Xero's granular quote-writing scope set: `accounting.invoices`, `accounting.contacts.read`, `accounting.settings.read`, and `offline_access`.
+  - Connected Send to Xero to the live `PUT /Quotes` API path when a Xero tenant is connected.
+  - Kept safe prepared-payload mode when Xero OAuth credentials or a connected tenant are not available.
+  - Stored live Xero quote IDs and responses in `xero_quotes` and `xero_sync_logs`.
+  - Added a Create Quote status chip and Connect Xero link for the OAuth setup state.
+  - Added focused tests for Xero token encryption/decryption and quote response parsing.
+  - Switched the local Xero OAuth callback to `http://localhost:3000/api/xero/callback`, because Xero only documents `http://localhost` as the non-HTTPS local testing exception.
+  - Added a separate local return URL so the OAuth callback can return to the existing `127.0.0.1` app page after connection.
+  - Fixed annual invoice coverage for tasks with an explicit year in the task name, such as `AGM 2025`, so they use that annual invoice year even when the time was logged in a later quote period.
+  - Updated Send to Xero annual usage booking to apply the same explicit task-year rule, keeping pre-paid preview logic and annual usage updates aligned.
+  - Updated the annual coverage summary copy to say `will NOT be invoiced` and made the service year label easier to read.
+  - Added a Send as selector so Create Quote can send either a draft invoice by default or a draft quote to Xero.
+  - Added Xero draft invoice payload support using `PUT /Invoices` with draft sales invoice fields while keeping the existing draft quote payload on `PUT /Quotes`.
+  - Stored the selected Xero document type in the sent/prepared quote ledger and outbound sync metadata.
+  - Renamed the billing navigation from Create Quote to Create New and from Quotes to Docs.
+  - Updated the Docs ledger to show document type plus reference, such as `Draft quote | June 2026`.
+  - Reworded user-facing document preview and backend error copy away from quote-only language where the workflow now supports invoices and quotes.
+  - Split annual-service boundary time entries when only part of the next entry fits the remaining pre-paid balance, leaving a comment on the invoiced remainder such as `0.15h booked to the pre-paid part`.
+  - Added an Annual overflow summary block under Annual coverage so annual-service hours that WILL be invoiced are shown separately from hours that will NOT be invoiced.
+  - Updated backend annual usage approval and ledger estimate calculations to use split document line quantities instead of full original Teamwork entry hours.
+  - Tightened the spacing between Annual coverage and Annual overflow blocks in Create New.
+  - Reduced spacing in the Reporting and Billing sidebar groups.
+  - Removed the sidebar collapse button and centered the Ziffer logo in the rail.
+  - Renamed the Docs ledger columns from Initial Teamwork to Teamwork estimate and from After annual to Excluding pre-paid.
+  - Added the period selector to Docs and filtered the Docs ledger plus summary cards by document billing period.
+  - Renamed the Annual Invoices per-cell allowance label from Annual to Pre-paid.
+  - Replaced the Docs average-payment toolbar note with Client and Status filters, and moved Teamwork estimate to the far-right summary card.
+  - Fixed Xero send payloads so pre-paid annual rows are excluded from outbound Xero line items while remaining in local source metadata.
+  - Expanded Xero validation error handling so the app can show nested Xero field validation messages instead of only the generic validation exception.
+  - Changed Xero outbound unit amounts to four-decimal values derived from the final line amount, quantity, and discount so Xero does not reject documents over one-cent line-total rounding differences.
+  - Changed live Send to Xero records to store Xero's returned document status, starting with `DRAFT`, instead of a local `sent` status.
+  - Added hourly Xero document status syncing, with stored sync timestamps and messages.
+  - Added a Docs detail modal for sent documents so the stored outbound Xero payload, latest Xero response, and sync logs can be inspected from the ledger.
+  - Replaced the Create New success copy with a concise message showing the sent document type, client, and total amount without showing the Xero document ID.
+  - Enlarged the Docs detail modal and changed it to show the sent task rows and source time-entry subrows first, matching the Create New preview structure, with raw Xero JSON kept as secondary technical detail.
+  - Removed the three seeded mock Docs records and restored their mock annual-usage adjustments, leaving only real Xero-tracked documents in the local Docs ledger.
+  - Added reporting document aggregates from sent Xero documents, mapped back to Teamwork people, projects, and their drilldowns.
+  - Added Teamwork data / Aggregate data toggles to Reporting > People and Reporting > Projects.
+  - Updated Teamwork reporting cells to stack hours above amount values, and added aggregate columns for Teamwork estimate, Excluding pre-paid, Sent to Xero, and Paid in Xero.
+  - Changed Teamwork reporting tables to show Total, Unbillable, Billable, and Billable % with stacked hours and amount values.
+  - Renamed Teamwork-facing UI labels from Billed to Billable in reporting and document preview summaries.
+  - Moved the People reporting amount chart into its own card below the table and added the same below-table chart to Projects reporting.
+  - Increased the reporting metric typography so stacked hour and amount values are easier to read.
+  - Removed the uppercase People and Projects reporting eyebrows, aligned each reporting title with the data toggle and search control, and added per-mode sort selectors.
+  - Removed the remaining People and Projects reporting table titles so those panels start directly with the toggle, sort, and search controls.
+  - Persisted Reporting > People and Reporting > Projects table mode and sort choices separately across refreshes.
+- Replaced the temporary Xero reference path with live cached reference sync:
+  - Added a `xero_accounts` cache table.
+  - Added live Xero reference fetching for Contacts, TaxRates, and Accounts through the connected OAuth tenant.
+  - Updated `/api/xero/reference` so Billing > Clients refreshes cached Xero references when Xero is connected, with cached data as the fallback and a six-hour default cache TTL.
+  - Made the Billing > Clients Refresh button force a live Xero reference refresh while normal page loads reuse fresh cached references.
+  - Changed the Billing Client account code field to use the cached Xero account dropdown while preserving existing account codes.
+  - Made document preview generation exclude Teamwork time entries with stored Teamwork invoice IDs directly in the SQL candidate query.
+  - Updated `INVOICE_INTEGRATION_PLAN.md` to mark Xero OAuth/reference sync and Teamwork invoice-ID exclusion as done.
+
+2026-07-03
+
+- Started document row editing:
+  - Added an `Edit` action to the three-dot menu on generated document task rows.
+  - Added an edit modal for task name, description, comment, hours, rate, discount, account code, and tax type.
+  - Added standardized service selection to the same edit modal.
+  - Extended the quote preview update endpoint so row edits are persisted in PostgreSQL and reflected in draft totals.
+  - Persisted edited service mappings on quote lines and preserved them when rows are rebuilt after billable/unbillable changes.
+  - Changed service remapping so the quote preview rebuilds from the original Teamwork entries and reruns pre-paid annual coverage.
+  - Stored service remap overrides per source time entry so later reaggregation keeps the user's service choice.
+  - Kept edited document rows feeding the Xero payload while leaving the original Teamwork time entries unchanged.

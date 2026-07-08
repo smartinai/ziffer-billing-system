@@ -172,6 +172,11 @@ export async function fetchTimeEntries(startDate, endDate) {
   );
 }
 
+export async function fetchTask(taskId) {
+  const response = await requestJson(`/projects/api/v3/tasks/${encodeURIComponent(taskId)}.json`);
+  return response.body?.task || response.body?.todoItem || response.body?.data || response.body;
+}
+
 export function getTeamworkStatus() {
   return {
     activeBaseUrl,

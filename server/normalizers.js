@@ -28,6 +28,23 @@ function textValue(value, fallback = "") {
   return String(value);
 }
 
+function idValue(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "object") return String(value.id ?? value.value ?? "");
+  return String(value);
+}
+
+function booleanValue(value, fallback = false) {
+  if (value === null || value === undefined || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+
+  const normalized = String(value).trim().toLowerCase();
+  if (["true", "yes", "y", "1", "billable"].includes(normalized)) return true;
+  if (["false", "no", "n", "0", "non-billable", "nonbillable", "not billable"].includes(normalized)) return false;
+  return fallback;
+}
+
 function urlValue(value) {
   if (value === null || value === undefined) return "";
   if (typeof value === "object") {
@@ -102,19 +119,68 @@ function readDate(row) {
   return String(value).slice(0, 10);
 }
 
+function readTaskId(row) {
+  return idValue(row.taskId ?? row.task?.id ?? row.todoItemId ?? row.todoItem?.id ?? row.todoItemID);
+}
+
+function readTaskName(row) {
+  return textValue(row.taskName || row.task || row.todoItemName || row.todoItem || row.todoItemTitle);
+}
+
+function readInvoiceId(row) {
+  return idValue(
+      row.invoiceId ??
+      row.teamworkInvoiceId ??
+      row.projectBillingInvoiceId ??
+      row.invoice?.id ??
+      row.projectBillingInvoice?.id ??
+      row.invoiceNumber ??
+      row.invoiceNo ??
+      row.invoice?.number
+  );
+}
+
+function readTimestamp(row, keys) {
+  for (const key of keys) {
+    if (row[key]) return String(row[key]);
+  }
+  return "";
+}
+
+function normalizeTags(value) {
+  if (!value) return [];
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((tag) => tag.trim())
+      .filter(Boolean);
+  }
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((tag) => textValue(tag?.name || tag?.tagName || tag?.title || tag?.id || tag))
+    .filter(Boolean);
+}
+
 export function normalizeTimeEntries(rows = []) {
   return rows
     .map((row) => {
       const minutes = readMinutes(row);
+      const taskName = readTaskName(row);
       return {
         date: readDate(row),
         deleted: Boolean(row.deleted || row.isDeleted),
-        description: row.description || row.taskName || row.task?.name || "",
+        description: textValue(row.description || row.note || row.comment || taskName),
         hours: minutes / 60,
         id: String(row.id),
-        isBillable: Boolean(row.billable ?? row.isBillable ?? row.billableType === "billable"),
+        isBillable: booleanValue(row.billable ?? row.isBillable ?? row.billableType),
         minutes,
         projectId: String(row.projectId ?? row.project?.id ?? ""),
+        sourceCreatedAt: readTimestamp(row, ["createdAt", "created_at", "dateCreated", "createdOn"]),
+        sourceUpdatedAt: readTimestamp(row, ["updatedAt", "updated_at", "dateUpdated", "updatedOn"]),
+        tags: normalizeTags(row.tags || row.tagIds || row.tagNames),
+        taskId: readTaskId(row),
+        taskName,
+        teamworkInvoiceId: readInvoiceId(row),
         userId: String(row.userId ?? row.user?.id ?? row.personId ?? "")
       };
     })

@@ -9,6 +9,13 @@
     "dev:server": "node --watch server/index.js",
     "build": "vite build",
     "build:demo": "node scripts/build-demo.mjs",
+    "db:local:start": "node scripts/local-postgres.mjs start",
+    "db:local:status": "node scripts/local-postgres.mjs status",
+    "db:local:stop": "node scripts/local-postgres.mjs stop",
+    "db:import-annual-invoices": "node scripts/import-annual-invoices.mjs",
+    "db:import-teamwork-store": "node scripts/import-teamwork-store.mjs",
+    "db:migrate": "node scripts/migrate.mjs",
+    "db:seed-mock-quotes": "node scripts/seed-mock-quotes.mjs",
     "start": "node server/index.js",
     "test": "node --test",
     "test:visual": "node scripts/visual-check.mjs",
@@ -20,13 +27,15 @@
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "lucide-react": "^0.468.0",
+    "pg": "^8.22.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "recharts": "^2.13.3"
   },
   "devDependencies": {
-    "concurrently": "^9.1.0",
+    "concurrently": "^9.2.3",
     "playwright": "^1.61.0",
+    "read-excel-file": "^9.2.0",
     "vite": "^6.0.3"
   }
 }
