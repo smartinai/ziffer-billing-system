@@ -8,7 +8,7 @@ The goal is not to copy the spreadsheet workflow one-to-one. The old script is a
 
 ## Current Implementation Status
 
-Last updated: 2026-07-03
+Last updated: 2026-07-09
 
 - [x] Invoice workflow direction agreed.
 - [x] PostgreSQL chosen as the database from the start.
@@ -38,6 +38,9 @@ Last updated: 2026-07-03
 - [x] Fetch and cache live Xero contacts, tax rates, and accounts for Billing > Clients settings.
 - [x] Exclude Teamwork time entries already linked to a Teamwork invoice ID from document generation candidates.
 - [x] Allow generated document row service remapping to rerun annual/pre-paid coverage from the original Teamwork source entries.
+- [x] Harden Xero sync-back as the v1 polling path for live testing, including persisted status, paid amount, outstanding amount, paid date, paid-within-days, last checked time, and sync messages.
+- [x] Add a read-only Billing > Audit Log view backed by `audit_events`.
+- [x] Add broad audit logging for important write actions, Xero sends, manual Xero status refreshes, auth events, Teamwork refreshes, and client/annual/document edits.
 
 Local database commands:
 
@@ -707,12 +710,20 @@ Purpose: capture later changes made in Xero.
 
 Work:
 
-- Fetch or listen for Xero quote/invoice/payment changes.
-- Store Xero status history.
-- Update the quote ledger payment fields when Xero reports a quote/invoice was paid.
-- Log changes made outside the app.
-- Update reporting with paid status and changed Xero amounts.
-- Decide whether webhooks or scheduled polling is the first production approach.
+- [x] Use scheduled polling as the first production path while VPS/DNS/HTTPS are still being prepared.
+- [x] Keep the manual Docs modal refresh action for targeted checks.
+- [x] Fetch Xero quote/invoice status and payment fields for sent documents.
+- [x] Persist Xero status, paid amount, outstanding amount, paid date, paid-within-days, last checked time, and the latest sync message.
+- [x] Store sync attempt history in `xero_sync_logs`, including failures.
+- [x] Preserve existing good document state when one Xero sync attempt fails.
+- [x] Treat Xero status/payment fields as authoritative after a document is sent.
+- [x] Add audit events for manual Xero status refreshes.
+- [ ] Later: add webhook support once VPS DNS and HTTPS are stable.
+- [ ] Later: detect and display line-level edits made directly in Xero, without overwriting the app's original sent row snapshot.
+
+Current implementation note:
+
+- Xero sync-back v1 uses hourly polling plus manual refresh. Billing > Docs keeps the app's original sent row snapshot for review, while status and payment fields come from Xero after send. Failed sync attempts are visible in sync logs and do not mark the document failed.
 
 ### Phase 8 - Invoice Reporting
 
@@ -747,11 +758,14 @@ Work:
 - Run the same schema migrations on the VPS.
 - Start with an empty production database.
 - Set up database backups.
+- [x] Add production PostgreSQL backup and restore scripts for the Docker Compose VPS path.
 - Set up app process management.
 - Set up HTTPS and reverse proxy.
 - Add proper user authentication.
 - Add role/permission model.
 - Add deployment target for the server app.
+- [x] Add a production Docker/Caddy deployment checklist and production environment template for VPS hardening.
+- [x] Configure the production app container to run as a non-root user.
 - Add environment variable setup for Teamwork and Xero.
 - Centrally configure Teamwork and Xero credentials.
 - Encrypt Xero tokens at rest or use a VPS secret-management pattern.

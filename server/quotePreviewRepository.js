@@ -2066,12 +2066,13 @@ export async function sendQuotePreviewToXero(id, input = {}) {
           teamwork_estimate_amount,
           teamwork_chargeable_amount,
           xero_sent_amount,
+          xero_outstanding_amount,
           idempotency_key,
           xero_status_message,
           xero_status_synced_at,
           response
         )
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, case when $13 then now() else null end, $14)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, case when $14 then now() else null end, $15)
         returning id, pushed_at as "pushedAt"
       `,
       [
@@ -2084,6 +2085,7 @@ export async function sendQuotePreviewToXero(id, input = {}) {
         amount,
         financialMetrics.teamworkEstimateAmount,
         financialMetrics.teamworkChargeableAmount,
+        amount,
         amount,
         idempotencyKey,
         sendMode === "live" ? `Xero returned status ${quoteStatus}.` : "Prepared locally; not sent to Xero.",

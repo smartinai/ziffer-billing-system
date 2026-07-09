@@ -3,6 +3,7 @@ dist/
 .netlify/
 .local-postgres/
 data/*.json
+backups/
 qa-screenshots/
 .env
 .env.local

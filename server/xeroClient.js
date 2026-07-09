@@ -5,6 +5,8 @@ import { getDatabasePool } from "./db.js";
 export const XERO_STATE_COOKIE = "ziffer_xero_oauth_state";
 
 const TOKEN_VERSION = "v1";
+const OAUTH_STATE_VERSION = "xo1";
+const OAUTH_STATE_MAX_AGE_MS = 10 * 60 * 1000;
 const REFRESH_WINDOW_MS = 2 * 60 * 1000;
 const pendingOAuthStates = new Set();
 
@@ -14,6 +16,21 @@ function base64Url(buffer) {
 
 function encryptionKey() {
   return crypto.createHash("sha256").update(config.xeroTokenEncryptionKey || config.sessionSecret).digest();
+}
+
+function signOAuthState(value) {
+  return crypto.createHmac("sha256", config.sessionSecret).update(value).digest("base64url");
+}
+
+function safeOAuthActor(actor = {}) {
+  if (!actor || typeof actor === "string") return { sub: actor || "unknown" };
+  return {
+    email: actor.email || actor.sub || "",
+    name: actor.name || actor.displayName || actor.email || actor.sub || "",
+    roles: Array.isArray(actor.roles) ? actor.roles : [],
+    sub: actor.sub || actor.email || "",
+    userId: actor.userId || actor.id || ""
+  };
 }
 
 export function encryptToken(value) {
@@ -116,17 +133,40 @@ export async function getXeroConnectionStatus() {
   };
 }
 
-export function createXeroOAuthState() {
-  const state = crypto.randomBytes(24).toString("base64url");
-  pendingOAuthStates.add(state);
+export function createXeroOAuthState(actor = {}) {
+  const payload = {
+    actor: safeOAuthActor(actor),
+    exp: Date.now() + OAUTH_STATE_MAX_AGE_MS,
+    nonce: crypto.randomBytes(24).toString("base64url")
+  };
+  const encoded = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const state = `${OAUTH_STATE_VERSION}.${encoded}.${signOAuthState(encoded)}`;
+  pendingOAuthStates.add(payload.nonce);
   return state;
 }
 
 function consumeOAuthState(state) {
-  if (!state || !pendingOAuthStates.has(state)) return false;
-  pendingOAuthStates.delete(state);
-  return true;
+  if (!state || typeof state !== "string") return null;
+  const [version, encoded, signature] = state.split(".");
+  if (version !== OAUTH_STATE_VERSION || !encoded || !signature) return null;
+  if (signature !== signOAuthState(encoded)) return null;
+
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+
+  if (!payload?.nonce || !pendingOAuthStates.has(payload.nonce)) return null;
+  pendingOAuthStates.delete(payload.nonce);
+  if (!payload.exp || payload.exp < Date.now()) return null;
+  return payload;
 }
+
+export const xeroOAuthTestHooks = {
+  consumeOAuthState
+};
 
 export function buildXeroAuthorizationUrl(state) {
   const configState = xeroConfigState();
@@ -274,8 +314,8 @@ async function storeConnection(pool, { connection, tokenPayload }) {
 
 export async function handleXeroCallback({ code, expectedState, state }) {
   const stateFromCookie = state && expectedState && state === expectedState;
-  const stateFromServer = consumeOAuthState(state);
-  if (!stateFromCookie && !stateFromServer) {
+  const statePayload = consumeOAuthState(state);
+  if (!stateFromCookie && !statePayload) {
     const error = new Error("Xero connection state did not match. Please try connecting again.");
     error.statusCode = 400;
     throw error;
@@ -297,6 +337,7 @@ export async function handleXeroCallback({ code, expectedState, state }) {
   await storeConnection(requireDatabase(), { connection, tokenPayload });
 
   return {
+    actor: statePayload?.actor || null,
     connected: true,
     tenantId: connection.tenantId || "",
     tenantName: connection.tenantName || ""

@@ -46,6 +46,9 @@ function documentLabel(documentType) {
 function mapQuote(row) {
   const amountSentToXero = money(row.xeroSentAmount || row.amount);
   const paidAmount = money(row.xeroPaidAmount);
+  const outstandingAmount = row.xeroOutstandingAmount === null || row.xeroOutstandingAmount === undefined
+    ? Math.max(amountSentToXero - paidAmount, 0)
+    : money(row.xeroOutstandingAmount);
   return {
     amountPaidInXero: paidAmount,
     amountSentToXero,
@@ -55,7 +58,7 @@ function mapQuote(row) {
     documentType: row.documentType || "draft_quote",
     id: row.id,
     initialTeamworkEstimate: money(row.teamworkEstimateAmount),
-    outstandingAmount: Math.max(amountSentToXero - paidAmount, 0),
+    outstandingAmount,
     paidAt: row.xeroPaidAt || null,
     paidWithinDays: days(row.paidWithinDays),
     periodEnd: row.periodEnd || "",
@@ -224,6 +227,7 @@ export async function listBillingQuotes() {
         quote.teamwork_chargeable_amount::float8 as "teamworkChargeableAmount",
         quote.xero_sent_amount::float8 as "xeroSentAmount",
         quote.xero_paid_amount::float8 as "xeroPaidAmount",
+        quote.xero_outstanding_amount::float8 as "xeroOutstandingAmount",
         quote.xero_paid_at as "xeroPaidAt",
         quote.xero_status_message as "xeroStatusMessage",
         quote.xero_status_synced_at as "xeroStatusSyncedAt",
@@ -272,6 +276,7 @@ export async function getBillingQuoteDetail(id) {
         quote.teamwork_chargeable_amount::float8 as "teamworkChargeableAmount",
         quote.xero_sent_amount::float8 as "xeroSentAmount",
         quote.xero_paid_amount::float8 as "xeroPaidAmount",
+        quote.xero_outstanding_amount::float8 as "xeroOutstandingAmount",
         quote.xero_paid_at as "xeroPaidAt",
         quote.xero_status_message as "xeroStatusMessage",
         quote.xero_status_synced_at as "xeroStatusSyncedAt",
@@ -380,6 +385,12 @@ function xeroPaidAt(document, paidAmount) {
   return latestPaymentDate(document)?.toISOString() || null;
 }
 
+function xeroOutstandingAmount(document, sentAmount, paidAmount) {
+  const amountDue = Number(document?.AmountDue);
+  if (Number.isFinite(amountDue)) return roundMoney(Math.max(amountDue, 0));
+  return roundMoney(Math.max(Number(sentAmount || 0) - Number(paidAmount || 0), 0));
+}
+
 async function logStatusSync(pool, { error, quoteId, request, response, status }) {
   await pool.query(
     `
@@ -455,6 +466,7 @@ export async function syncXeroDocumentStatuses(input = {}) {
       const document = fetched.document || {};
       const status = fetched.xeroStatus || fetched.status || "Unknown";
       const paidAmount = xeroPaidAmount(document);
+      const outstandingAmount = xeroOutstandingAmount(document, row.xeroSentAmount, paidAmount);
       const paidAt = xeroPaidAt(document, paidAmount);
       const paidDays = paidWithinDays(row.quoteDate, paidAt);
 
@@ -466,8 +478,9 @@ export async function syncXeroDocumentStatuses(input = {}) {
             xero_paid_amount = $3,
             xero_paid_at = $4,
             paid_within_days = $5,
-            response = $6,
-            xero_status_message = $7,
+            xero_outstanding_amount = $6,
+            response = $7,
+            xero_status_message = $8,
             xero_status_synced_at = now()
           where id = $1
         `,
@@ -477,6 +490,7 @@ export async function syncXeroDocumentStatuses(input = {}) {
           paidAmount,
           paidAt,
           paidDays,
+          outstandingAmount,
           JSON.stringify(fetched.payload || {}),
           `Fetched Xero status ${status}.`
         ]

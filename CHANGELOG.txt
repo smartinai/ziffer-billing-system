@@ -424,3 +424,24 @@ Add a new dated section whenever work continues on a new day.
   - Changed service remapping so the quote preview rebuilds from the original Teamwork entries and reruns pre-paid annual coverage.
   - Stored service remap overrides per source time entry so later reaggregation keeps the user's service choice.
   - Kept edited document rows feeding the Xero payload while leaving the original Teamwork time entries unchanged.
+
+2026-07-09
+
+- Hardened Xero sync-back for live testing:
+  - Added persisted Xero outstanding amount alongside Xero status, paid amount, paid date, paid-within-days, last synced time, and sync messages.
+  - Kept the hourly Xero status poller and manual Docs refresh action as the v1 sync-back path.
+  - Preserved existing good document status/payment data when a single Xero sync attempt fails.
+  - Kept sync attempt history in `xero_sync_logs`.
+- Added the first admin audit trail:
+  - Added a reusable audit repository that redacts secret-looking metadata keys before storage.
+  - Added `GET /api/audit-events` with action, entity type, and user filters.
+  - Logged auth events, Teamwork refreshes, billing client edits, annual invoice edits, document preview creation, document metadata/row edits, billable-state changes, Send to Xero, manual Xero status refreshes, and Xero connect/disconnect events.
+  - Added Billing > Audit Log with filters and a metadata detail modal.
+- Updated `INVOICE_INTEGRATION_PLAN.md` to mark polling-based Xero sync-back and the audit log as implemented.
+- Polished the Audit Log for review:
+  - Added readable action and entity labels.
+  - Added category filtering for documents, Xero, clients, annual invoices, auth, and errors.
+  - Added success/error status pills.
+  - Added Open document actions for Xero document audit rows.
+  - Split the audit detail modal into a readable summary and technical JSON details.
+  - Improved new audit summaries for all-doc Xero refreshes, annual invoice edits, manual document rows, and Send to Xero events.

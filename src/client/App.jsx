@@ -34,6 +34,7 @@ import {
 import {
   createQuotePreview,
   demoMode,
+  getAuditEvents,
   getBillingQuoteDetail,
   getAnnualInvoices,
   getBillingQuotes,
@@ -44,8 +45,10 @@ import {
   logout,
   refreshSummary,
   sendQuoteToXero,
+  syncBillingQuotesXeroStatus,
   syncBillingQuoteXeroStatus,
   updateAnnualInvoiceUsage,
+  updateAccount,
   updateQuotePreview,
   updateQuoteTimeEntryBillable
 } from "./api.js";
@@ -91,7 +94,8 @@ const billingTabs = [
   { id: "billing-create-quote", label: "Create New", icon: FileText },
   { id: "billing-quotes", label: "Docs", icon: FileText },
   { id: "billing-annual-invoices", label: "Annual Invoices", icon: CalendarDays },
-  { id: "billing-clients", label: "Clients", icon: BriefcaseBusiness }
+  { id: "billing-clients", label: "Clients", icon: BriefcaseBusiness },
+  { id: "billing-audit-log", label: "Audit Log", icon: ShieldCheck }
 ];
 
 const allTabs = [...reportingTabs, ...billingTabs];
@@ -462,6 +466,21 @@ function useReportingPreferences(scope) {
   };
 }
 
+function useEscapeToClose(onClose, active = true) {
+  useEffect(() => {
+    if (!active || typeof onClose !== "function") return undefined;
+
+    function handleKeyDown(event) {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      event.preventDefault();
+      onClose();
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [active, onClose]);
+}
+
 function annualCoverageKey(coverage) {
   return [coverage.usageId, coverage.serviceId, coverage.year].filter(Boolean).join(":");
 }
@@ -631,6 +650,7 @@ function QuoteLineEditModal({ annualYears = [], currencyCode = "EUR", line, onCl
   const [draft, setDraft] = useState(() => quoteLineEditDraft(line));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  useEscapeToClose(onClose, !saving);
   const taxRateOptions = useMemo(() => {
     const seen = new Set();
     const options = taxRates
@@ -913,6 +933,7 @@ function statusLabel(value) {
 function titleForTab(tab) {
   const titles = {
     "billing-annual-invoices": "Annual Invoices",
+    "billing-audit-log": "Audit Log",
     "billing-clients": "Clients",
     "billing-create-quote": "Create New",
     "billing-quotes": "Docs",
@@ -992,8 +1013,8 @@ function UserIdentity({ user, meta }) {
 }
 
 function LoginScreen({ onAuthenticated }) {
-  const [username, setUsername] = useState("admin");
-  const [password, setPassword] = useState("admin");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -1024,12 +1045,12 @@ function LoginScreen({ onAuthenticated }) {
       <form className="login-panel" onSubmit={handleSubmit}>
         <LockKeyhole size={22} />
         <div>
-          <h2>Admin access</h2>
-          <p>Temporary local account for the first reporting build.</p>
+          <h2>Sign in</h2>
+          <p>Use your ZIFFER account to manage reporting and billing.</p>
         </div>
         <label>
-          Username
-          <input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" />
+          Email
+          <input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" type="email" />
         </label>
         <label>
           Password
@@ -1047,6 +1068,103 @@ function LoginScreen({ onAuthenticated }) {
         </button>
       </form>
     </main>
+  );
+}
+
+function AccountSettingsModal({ onClose, onSaved, user }) {
+  const [displayName, setDisplayName] = useState(user?.displayName || user?.name || "");
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  useEscapeToClose(onClose, !saving);
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+    setError("");
+
+    if (newPassword && newPassword !== confirmPassword) {
+      setError("New passwords do not match.");
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const payload = await updateAccount({
+        currentPassword,
+        displayName,
+        newPassword
+      });
+      onSaved(payload.user);
+      onClose();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section aria-labelledby="account-settings-title" className="settings-modal account-settings-modal" role="dialog" aria-modal="true">
+        <header className="settings-modal-header">
+          <div>
+            <p>Account</p>
+            <h2 id="account-settings-title">Account settings</h2>
+            <span>{user?.email || ""}</span>
+          </div>
+          <button aria-label="Close account settings" className="modal-close-button" disabled={saving} onClick={onClose} type="button">
+            <X size={20} />
+          </button>
+        </header>
+
+        <form className="settings-form" onSubmit={handleSubmit}>
+          <label className="settings-form-wide">
+            Name
+            <input value={displayName} onChange={(event) => setDisplayName(event.target.value)} autoComplete="name" />
+          </label>
+          <label>
+            Current password
+            <input
+              value={currentPassword}
+              onChange={(event) => setCurrentPassword(event.target.value)}
+              type="password"
+              autoComplete="current-password"
+              placeholder="Required to change password"
+            />
+          </label>
+          <label>
+            New password
+            <input
+              value={newPassword}
+              onChange={(event) => setNewPassword(event.target.value)}
+              type="password"
+              autoComplete="new-password"
+            />
+          </label>
+          <label>
+            Confirm new password
+            <input
+              value={confirmPassword}
+              onChange={(event) => setConfirmPassword(event.target.value)}
+              type="password"
+              autoComplete="new-password"
+            />
+          </label>
+          {error ? <p className="form-error settings-form-wide">{error}</p> : null}
+          <footer className="settings-modal-actions settings-form-wide">
+            <button className="secondary-button" disabled={saving} onClick={onClose} type="button">
+              Cancel
+            </button>
+            <button className="primary-action-button" disabled={saving} type="submit">
+              {saving ? <Loader2 className="spin" size={17} /> : <Save size={17} />}
+              Save
+            </button>
+          </footer>
+        </form>
+      </section>
+    </div>
   );
 }
 
@@ -1841,6 +1959,7 @@ function BillingDocumentDetailModal({ detail, error, loading, onClose, onRefresh
   const payload = detail?.payload || {};
   const latestResponse = detail?.latestResponse || {};
   const logs = detail?.logs || [];
+  useEscapeToClose(onClose);
 
   return (
     <div className="modal-backdrop" role="presentation">
@@ -3025,6 +3144,7 @@ function BillingClientModal({ client, onClose, onSave, xeroAccounts = [], xeroCo
   const [draft, setDraft] = useState(() => clientDraft(client));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  useEscapeToClose(onClose, !saving);
   const selectedContact = useMemo(
     () => xeroContacts.find((contact) => contact.name === draft.xeroClientName) || null,
     [draft.xeroClientName, xeroContacts]
@@ -3265,6 +3385,337 @@ function ClientStatsCard({ label, tone = "", value, detail }) {
       <strong>{value}</strong>
       {detail ? <small>{detail}</small> : null}
     </article>
+  );
+}
+
+const auditActionLabels = {
+  account_update: "Account updated",
+  annual_invoice_update: "Annual invoice updated",
+  billing_client_update: "Billing client updated",
+  document_metadata_update: "Document metadata updated",
+  document_preview_create: "Document preview created",
+  document_rows_update: "Document rows updated",
+  login: "Login",
+  login_failed: "Failed login",
+  logout: "Logout",
+  send_to_xero: "Sent to Xero",
+  teamwork_sync_refresh: "Teamwork refreshed",
+  time_entry_billable_update: "Billable state changed",
+  xero_connect: "Xero connected",
+  xero_disconnect: "Xero disconnected",
+  xero_status_refresh: "Xero status refreshed"
+};
+
+const auditEntityLabels = {
+  app_user: "User",
+  annual_invoice_usage: "Annual invoice",
+  auth: "Auth",
+  billing_client: "Billing client",
+  quote_preview: "Document preview",
+  teamwork_report: "Teamwork report",
+  teamwork_time_entry: "Time entry",
+  xero: "Xero",
+  xero_document: "Xero document"
+};
+
+const auditCategoryOptions = [
+  { value: "all", label: "All" },
+  { value: "documents", label: "Documents" },
+  { value: "xero", label: "Xero" },
+  { value: "clients", label: "Clients" },
+  { value: "annual", label: "Annual invoices" },
+  { value: "auth", label: "Auth" },
+  { value: "errors", label: "Errors only" }
+];
+
+function actionLabel(value) {
+  if (auditActionLabels[value]) return auditActionLabels[value];
+  return String(value || "")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function entityLabel(value) {
+  if (auditEntityLabels[value]) return auditEntityLabels[value];
+  return actionLabel(value);
+}
+
+function auditCategory(event) {
+  if (event.entityType === "auth") return "auth";
+  if (event.entityType === "billing_client") return "clients";
+  if (event.entityType === "annual_invoice_usage") return "annual";
+  if (String(event.action || "").startsWith("xero_") || event.action === "send_to_xero" || event.entityType === "xero_document" || event.entityType === "xero") return "xero";
+  if (["quote_preview", "teamwork_time_entry"].includes(event.entityType)) return "documents";
+  return "all";
+}
+
+function auditIsError(event) {
+  const metadata = event.metadata || {};
+  return event.action === "login_failed" || metadata.failed > 0 || String(metadata.status || "").toLowerCase() === "error";
+}
+
+function auditTone(event) {
+  if (auditIsError(event)) return "danger";
+  if (["send_to_xero", "xero_connect", "xero_status_refresh"].includes(event.action) && !auditIsError(event)) return "success";
+  return "neutral";
+}
+
+function auditStatusLabel(event) {
+  if (auditIsError(event)) return "Needs review";
+  if (event.action === "send_to_xero") return "Sent";
+  if (event.action === "xero_status_refresh") return "Synced";
+  if (event.action === "xero_connect") return "Connected";
+  return "Logged";
+}
+
+function canOpenAuditDocument(event) {
+  return event.entityType === "xero_document" && Boolean(event.entityId);
+}
+
+function AuditLogView() {
+  const [actionFilter, setActionFilter] = useState("all");
+  const [actorFilter, setActorFilter] = useState("all");
+  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [entityTypeFilter, setEntityTypeFilter] = useState("all");
+  const [auditData, setAuditData] = useState({ actions: [], actors: [], entityTypes: [], events: [] });
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [selectedEvent, setSelectedEvent] = useState(null);
+  const [selectedDocumentDetail, setSelectedDocumentDetail] = useState(null);
+  const [selectedDocumentError, setSelectedDocumentError] = useState("");
+  const [selectedDocumentId, setSelectedDocumentId] = useState("");
+  const [selectedDocumentLoading, setSelectedDocumentLoading] = useState(false);
+  const [selectedDocumentRefreshing, setSelectedDocumentRefreshing] = useState(false);
+
+  async function loadAuditEvents() {
+    setLoading(true);
+    setError("");
+    try {
+      setAuditData(await getAuditEvents({
+        action: actionFilter,
+        actor: actorFilter,
+        entityType: entityTypeFilter
+      }));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadAuditEvents();
+  }, [actionFilter, actorFilter, entityTypeFilter]);
+
+  const events = useMemo(
+    () =>
+      (auditData.events || []).filter((event) => {
+        if (categoryFilter === "errors") return auditIsError(event);
+        if (categoryFilter === "all") return true;
+        return auditCategory(event) === categoryFilter;
+      }),
+    [auditData.events, categoryFilter]
+  );
+
+  async function openAuditDocument(documentId) {
+    if (!documentId) return;
+    setSelectedDocumentId(documentId);
+    setSelectedDocumentDetail(null);
+    setSelectedDocumentError("");
+    setSelectedDocumentLoading(true);
+    try {
+      setSelectedDocumentDetail(await getBillingQuoteDetail(documentId));
+    } catch (err) {
+      setSelectedDocumentError(err.message);
+    } finally {
+      setSelectedDocumentLoading(false);
+    }
+  }
+
+  async function refreshAuditDocumentStatus() {
+    if (!selectedDocumentId) return;
+    setSelectedDocumentRefreshing(true);
+    setSelectedDocumentError("");
+    try {
+      await syncBillingQuoteXeroStatus(selectedDocumentId);
+      setSelectedDocumentDetail(await getBillingQuoteDetail(selectedDocumentId));
+      await loadAuditEvents();
+    } catch (err) {
+      setSelectedDocumentError(err.message);
+    } finally {
+      setSelectedDocumentRefreshing(false);
+    }
+  }
+
+  useEscapeToClose(() => setSelectedEvent(null), Boolean(selectedEvent) && !selectedDocumentId);
+
+  return (
+    <Fragment>
+      <section className="panel full-panel audit-log-panel">
+        <div className="table-toolbar">
+          <div className="table-toolbar-heading">
+            <p>Admin</p>
+            <h2>Audit Log</h2>
+          </div>
+          <div className="docs-filter-group" aria-label="Audit filters">
+            <label>
+              <span>Category</span>
+              <select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>
+                {auditCategoryOptions.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>Action</span>
+              <select value={actionFilter} onChange={(event) => setActionFilter(event.target.value)}>
+                <option value="all">All actions</option>
+                {(auditData.actions || []).map((action) => (
+                  <option key={action} value={action}>{actionLabel(action)}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>Entity</span>
+              <select value={entityTypeFilter} onChange={(event) => setEntityTypeFilter(event.target.value)}>
+                <option value="all">All entities</option>
+                {(auditData.entityTypes || []).map((entityType) => (
+                  <option key={entityType} value={entityType}>{actionLabel(entityType)}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>User</span>
+              <select value={actorFilter} onChange={(event) => setActorFilter(event.target.value)}>
+                <option value="all">All users</option>
+                {(auditData.actors || []).map((actor) => (
+                  <option key={actor} value={actor}>{actor}</option>
+                ))}
+              </select>
+            </label>
+            <button className="secondary-button" disabled={loading} onClick={loadAuditEvents} type="button">
+              {loading ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
+              Refresh
+            </button>
+          </div>
+        </div>
+        {error ? <p className="form-error">{error}</p> : null}
+        <div className="table-wrap">
+          <table className="quotes-table audit-log-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>User</th>
+                <th>Action</th>
+                <th>Status</th>
+                <th>Entity</th>
+                <th>Summary</th>
+              </tr>
+            </thead>
+            <tbody>
+              {events.map((event) => {
+                const tone = auditTone(event);
+                return (
+                  <tr className={`clickable-row audit-row audit-row--${tone}`} key={event.id} onClick={() => setSelectedEvent(event)}>
+                    <td>{formattedDateTime(event.createdAt)}</td>
+                    <td>{event.actor}</td>
+                    <td>{actionLabel(event.action)}</td>
+                    <td>
+                      <span className={`audit-status-pill audit-status-pill--${tone}`}>{auditStatusLabel(event)}</span>
+                    </td>
+                    <td>
+                      <div className="audit-entity-cell">
+                        <span>{entityLabel(event.entityType)}{event.entityId ? ` / ${event.entityId.slice(0, 8)}` : ""}</span>
+                        {canOpenAuditDocument(event) ? (
+                          <button
+                            className="inline-link-button"
+                            onClick={(clickEvent) => {
+                              clickEvent.stopPropagation();
+                              openAuditDocument(event.entityId);
+                            }}
+                            type="button"
+                          >
+                            Open document
+                          </button>
+                        ) : null}
+                      </div>
+                    </td>
+                    <td>{event.summary || ""}</td>
+                  </tr>
+                );
+              })}
+              {!events.length ? (
+                <tr>
+                  <td className="empty-cell" colSpan="6">
+                    {loading ? "Loading audit events." : "No audit events match these filters."}
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {selectedEvent ? (
+        <div className="modal-backdrop" role="presentation">
+          <section aria-labelledby="audit-event-title" className="settings-modal audit-event-modal">
+            <div className="settings-modal-header">
+              <div>
+                <p>Audit Event</p>
+                <h2 id="audit-event-title">{actionLabel(selectedEvent.action)}</h2>
+                <span>{formattedDateTime(selectedEvent.createdAt)} by {selectedEvent.actor}</span>
+              </div>
+              <button aria-label="Close audit event" className="modal-close-button" onClick={() => setSelectedEvent(null)} type="button">
+                <X size={21} />
+              </button>
+            </div>
+            <dl className="document-meta-grid audit-event-meta">
+              <div>
+                <dt>Status</dt>
+                <dd>
+                  <span className={`audit-status-pill audit-status-pill--${auditTone(selectedEvent)}`}>{auditStatusLabel(selectedEvent)}</span>
+                </dd>
+              </div>
+              <div>
+                <dt>Entity</dt>
+                <dd>{entityLabel(selectedEvent.entityType) || "Not set"}</dd>
+              </div>
+              <div>
+                <dt>Entity ID</dt>
+                <dd>{selectedEvent.entityId || "Not set"}</dd>
+              </div>
+              <div>
+                <dt>Summary</dt>
+                <dd>{selectedEvent.summary || "No summary"}</dd>
+              </div>
+            </dl>
+            {canOpenAuditDocument(selectedEvent) ? (
+              <button className="secondary-button audit-open-document-button" onClick={() => openAuditDocument(selectedEvent.entityId)} type="button">
+                <FileText size={17} />
+                Open document
+              </button>
+            ) : null}
+            <h3 className="json-preview-title">Technical details</h3>
+            <pre className="json-preview">{JSON.stringify(selectedEvent.metadata || {}, null, 2)}</pre>
+          </section>
+        </div>
+      ) : null}
+
+      {selectedDocumentId ? (
+        <BillingDocumentDetailModal
+          detail={selectedDocumentDetail}
+          error={selectedDocumentError}
+          loading={selectedDocumentLoading}
+          refreshingStatus={selectedDocumentRefreshing}
+          onClose={() => {
+            setSelectedDocumentId("");
+            setSelectedDocumentDetail(null);
+            setSelectedDocumentError("");
+          }}
+          onRefreshStatus={refreshAuditDocumentStatus}
+        />
+      ) : null}
+    </Fragment>
   );
 }
 
@@ -3673,7 +4124,7 @@ function AnnualInvoicesView() {
   );
 }
 
-function Shell({ onLogout, user }) {
+function Shell({ onLogout, onUserUpdated, user }) {
   const [activeTab, setActiveTab] = useState(initialActiveTab);
   const [range, setRange] = useState({ endDate: today(), startDate: "2026-01-01" });
   const [report, setReport] = useState(null);
@@ -3689,6 +4140,7 @@ function Shell({ onLogout, user }) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
+  const [accountModalOpen, setAccountModalOpen] = useState(false);
   const monthOptions = useMemo(() => dataMonthOptions(report?.yearTrend), [report?.yearTrend]);
   const isReportingTab = activeTab.startsWith("reporting-");
   const isDocsTab = activeTab === "billing-quotes";
@@ -3733,6 +4185,20 @@ function Shell({ onLogout, user }) {
     setBillingQuotesLoading(true);
     setError("");
     try {
+      const payload = await getBillingQuotes();
+      setBillingQuotes(payload.quotes || []);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBillingQuotesLoading(false);
+    }
+  }
+
+  async function refreshBillingQuotesFromXero() {
+    setBillingQuotesLoading(true);
+    setError("");
+    try {
+      await syncBillingQuotesXeroStatus();
       const payload = await getBillingQuotes();
       setBillingQuotes(payload.quotes || []);
     } catch (err) {
@@ -3901,8 +4367,10 @@ function Shell({ onLogout, user }) {
           </nav>
         </div>
         <div className="rail-footer">
-          <UserRound size={18} />
-          <span className="rail-user-name">{user?.name || "admin"}</span>
+          <button aria-label="Account settings" className="rail-account-button" onClick={() => setAccountModalOpen(true)} type="button">
+            <UserRound size={18} />
+            <span className="rail-user-name">{user?.name || user?.email || "Account"}</span>
+          </button>
           {demoMode ? null : (
             <button aria-label="Sign out" onClick={onLogout} type="button">
               <LogOut size={17} />
@@ -3925,7 +4393,7 @@ function Shell({ onLogout, user }) {
               refreshTitle={isDocsTab ? "Refresh Docs" : undefined}
               refreshing={isDocsTab ? billingQuotesLoading : refreshing}
               setRange={setRange}
-              onRefresh={isDocsTab ? loadBillingQuotes : handleRefresh}
+              onRefresh={isDocsTab ? refreshBillingQuotesFromXero : handleRefresh}
             />
           ) : null}
         </header>
@@ -3969,9 +4437,17 @@ function Shell({ onLogout, user }) {
                 xeroTaxRates={xeroTaxRates}
               />
             ) : null}
+            {activeTab === "billing-audit-log" ? <AuditLogView /> : null}
           </div>
         )}
       </section>
+      {accountModalOpen ? (
+        <AccountSettingsModal
+          user={user}
+          onClose={() => setAccountModalOpen(false)}
+          onSaved={onUserUpdated}
+        />
+      ) : null}
     </main>
   );
 }
@@ -4008,5 +4484,11 @@ export function App() {
     return <LoginScreen onAuthenticated={refreshSession} />;
   }
 
-  return <Shell onLogout={handleLogout} user={session.user} />;
+  return (
+    <Shell
+      onLogout={handleLogout}
+      onUserUpdated={(user) => setSession((current) => ({ ...(current || {}), authenticated: true, user }))}
+      user={session.user}
+    />
+  );
 }

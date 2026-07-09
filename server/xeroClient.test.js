@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  createXeroOAuthState,
   decryptToken,
   encryptToken,
   parseXeroDocumentResponse,
   parseXeroQuoteResponse,
+  xeroOAuthTestHooks,
   xeroValidationMessages
 } from "./xeroClient.js";
 
@@ -15,6 +17,31 @@ test("encrypts and decrypts stored Xero tokens", () => {
   assert.notEqual(encrypted, token);
   assert.match(encrypted, /^v1:/);
   assert.equal(decryptToken(encrypted), token);
+});
+
+test("Xero OAuth state carries a signed audit actor without exposing it plainly", () => {
+  const state = createXeroOAuthState({
+    email: "irina.godmane@ziffer.lu",
+    name: "Irina Godmane",
+    roles: ["admin"],
+    sub: "irina.godmane@ziffer.lu",
+    userId: "user-1"
+  });
+
+  assert.doesNotMatch(state, /irina\.godmane@ziffer\.lu/);
+
+  const payload = xeroOAuthTestHooks.consumeOAuthState(state);
+  assert.equal(payload.actor.sub, "irina.godmane@ziffer.lu");
+  assert.equal(payload.actor.name, "Irina Godmane");
+  assert.deepEqual(payload.actor.roles, ["admin"]);
+  assert.equal(xeroOAuthTestHooks.consumeOAuthState(state), null);
+});
+
+test("Xero OAuth state rejects tampering", () => {
+  const state = createXeroOAuthState({ sub: "krista.jansone@ziffer.lu" });
+  const tampered = state.replace(/\.[^.]+$/, ".tampered");
+
+  assert.equal(xeroOAuthTestHooks.consumeOAuthState(tampered), null);
 });
 
 test("extracts quote identifiers from a Xero quote response", () => {

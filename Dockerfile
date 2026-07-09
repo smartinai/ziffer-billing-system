@@ -25,5 +25,8 @@ COPY --from=build /app/scripts ./scripts
 COPY --from=build /app/server ./server
 COPY --from=build /app/src ./src
 
+RUN mkdir -p /app/data && chown -R node:node /app/data
+USER node
+
 EXPOSE 3000
 CMD ["node", "server/index.js"]

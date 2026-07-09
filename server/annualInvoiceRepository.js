@@ -43,7 +43,9 @@ function mapUsage(row) {
   return {
     annualHours: row.maxHours === null || row.maxHours === undefined ? "" : Number(row.maxHours),
     billingClientId: row.billingClientId,
+    clientName: row.sourceClientName || "",
     serviceId: row.serviceId,
+    serviceName: row.sourceServiceName || "",
     usageId: row.id,
     usedHours: row.usedHours === null || row.usedHours === undefined ? 0 : Number(row.usedHours),
     year: Number(row.forYear)
@@ -212,6 +214,8 @@ export async function updateAnnualInvoiceUsage(input = {}) {
               id,
               billing_client_id as "billingClientId",
               service_id as "serviceId",
+              source_client_name as "sourceClientName",
+              source_service_name as "sourceServiceName",
               max_hours::float8 as "maxHours",
               used_hours::float8 as "usedHours",
               for_year as "forYear"
@@ -234,6 +238,8 @@ export async function updateAnnualInvoiceUsage(input = {}) {
               id,
               billing_client_id as "billingClientId",
               service_id as "serviceId",
+              source_client_name as "sourceClientName",
+              source_service_name as "sourceServiceName",
               max_hours::float8 as "maxHours",
               used_hours::float8 as "usedHours",
               for_year as "forYear"

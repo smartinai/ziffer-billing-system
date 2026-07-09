@@ -15,6 +15,8 @@
     "db:import-annual-invoices": "node scripts/import-annual-invoices.mjs",
     "db:import-teamwork-store": "node scripts/import-teamwork-store.mjs",
     "db:migrate": "node scripts/migrate.mjs",
+    "db:production:backup": "node scripts/backup-production-db.mjs",
+    "db:production:restore": "node scripts/restore-production-db.mjs",
     "db:seed-mock-quotes": "node scripts/seed-mock-quotes.mjs",
     "start": "node server/index.js",
     "test": "node --test",

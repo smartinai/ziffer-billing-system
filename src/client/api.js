@@ -1,22 +1,55 @@
 export const demoMode = import.meta.env.VITE_DEMO_MODE === "true";
 
+let csrfTokenPromise = null;
+
 async function getDemoSummary(range) {
   const { getDemoReport } = await import("./demoData.js");
   return getDemoReport(range);
 }
 
+function isWriteMethod(method = "GET") {
+  return ["POST", "PATCH", "PUT", "DELETE"].includes(String(method).toUpperCase());
+}
+
+async function getCsrfToken() {
+  if (!csrfTokenPromise) {
+    csrfTokenPromise = fetch("/api/auth/csrf", {
+      credentials: "include",
+      headers: { "Content-Type": "application/json" }
+    })
+      .then(async (response) => {
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.message || "Could not prepare security token.");
+        return payload.csrfToken;
+      })
+      .catch((error) => {
+        csrfTokenPromise = null;
+        throw error;
+      });
+  }
+  return csrfTokenPromise;
+}
+
 async function request(path, options = {}) {
+  const method = options.method || "GET";
+  const headers = {
+    "Content-Type": "application/json",
+    ...(options.headers || {})
+  };
+
+  if (isWriteMethod(method) && path !== "/api/auth/login") {
+    headers["x-csrf-token"] = await getCsrfToken();
+  }
+
   const response = await fetch(path, {
     credentials: "include",
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.headers || {})
-    },
-    ...options
+    ...options,
+    headers
   });
 
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
+    if (response.status === 403) csrfTokenPromise = null;
     throw new Error(payload.message || "Request failed.");
   }
   return payload;
@@ -36,6 +69,9 @@ export function login(username, password) {
   return request("/api/auth/login", {
     body: JSON.stringify({ password, username }),
     method: "POST"
+  }).then((payload) => {
+    csrfTokenPromise = null;
+    return payload;
   });
 }
 
@@ -43,7 +79,19 @@ export function logout() {
   if (demoMode) {
     return Promise.resolve({ authenticated: true, user: { name: "demo" } });
   }
-  return request("/api/auth/logout", { method: "POST" });
+  return request("/api/auth/logout", { method: "POST" }).finally(() => {
+    csrfTokenPromise = null;
+  });
+}
+
+export function updateAccount(input) {
+  if (demoMode) {
+    return Promise.resolve({ authenticated: true, user: { displayName: input.displayName, name: input.displayName || "demo" } });
+  }
+  return request("/api/auth/account", {
+    body: JSON.stringify(input),
+    method: "PATCH"
+  });
 }
 
 export function getSummary(range) {
@@ -87,6 +135,18 @@ export function getBillingQuotes() {
   return request("/api/billing/quotes");
 }
 
+export function getAuditEvents(filters = {}) {
+  if (demoMode) {
+    return Promise.resolve({ actions: [], actors: [], entityTypes: [], events: [] });
+  }
+  const params = new URLSearchParams();
+  if (filters.action && filters.action !== "all") params.set("action", filters.action);
+  if (filters.actor && filters.actor !== "all") params.set("actor", filters.actor);
+  if (filters.entityType && filters.entityType !== "all") params.set("entityType", filters.entityType);
+  const query = params.toString();
+  return request(`/api/audit-events${query ? `?${query}` : ""}`);
+}
+
 export function getBillingQuoteDetail(id) {
   if (demoMode) {
     return Promise.resolve({ latestResponse: {}, lines: [], logs: [], payload: {}, quote: null });
@@ -99,6 +159,13 @@ export function syncBillingQuoteXeroStatus(id) {
     return Promise.resolve({ failed: 0, skipped: 0, synced: 0, total: 0 });
   }
   return request(`/api/billing/quotes/${id}/sync-xero-status`, { method: "POST" });
+}
+
+export function syncBillingQuotesXeroStatus() {
+  if (demoMode) {
+    return Promise.resolve({ failed: 0, skipped: 0, synced: 0, total: 0 });
+  }
+  return request("/api/billing/quotes/sync-xero-status", { method: "POST" });
 }
 
 export function getXeroReference({ force = false } = {}) {

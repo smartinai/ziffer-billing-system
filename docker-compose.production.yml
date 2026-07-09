@@ -21,9 +21,17 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      DATABASE_SSL: "false"
+      COOKIE_SECURE: "true"
     depends_on:
       postgres:
         condition: service_healthy
+    volumes:
+      - app-data:/app/data
     expose:
       - "3000"
 
@@ -42,5 +50,6 @@ services:
 
 volumes:
   postgres-data:
+  app-data:
   caddy-data:
   caddy-config:

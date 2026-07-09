@@ -20,9 +20,8 @@ TEAMWORK_SITE_NAME=zifferlu.eu
 TEAMWORK_API_KEY=replace-with-teamwork-api-key
 DATABASE_URL=postgres://ziffer:ziffer_local_password@127.0.0.1:55432/ziffer_billing
 DATABASE_SSL=false
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=admin
 SESSION_SECRET=replace-with-a-long-random-secret-before-vps
+XERO_TOKEN_ENCRYPTION_KEY=replace-with-a-long-random-secret-before-vps
 ```
 
 6. Start the local database and apply migrations:
@@ -49,7 +48,18 @@ npm start
 
 8. Open `http://127.0.0.1:3000/`.
 
-9. Sign in with the local admin account and click `Sync Teamwork` before a live-data demo on a new computer. The first full sync can take a few minutes.
+9. Sign in with one of the seeded admin users and click `Sync Teamwork` before a live-data demo on a new computer. The first full sync can take a few minutes.
+
+## Production Secrets
+
+When `NODE_ENV=production`, the server refuses to start unless these are set to long random values:
+
+- `SESSION_SECRET`
+- `XERO_TOKEN_ENCRYPTION_KEY`
+
+For HTTPS deployments, cookies are marked secure by default. Keep `COOKIE_SECURE=true` on the VPS.
+
+For VPS deployment, use [docs/VPS_DEPLOYMENT_SECURITY.md](docs/VPS_DEPLOYMENT_SECURITY.md) and copy `production.env.example` to `.env` on the server.
 
 ## Data Handling
 
@@ -66,3 +76,14 @@ npm test
 npm run build
 npm run test:visual
 ```
+
+## Production Backups
+
+With the production Docker Compose stack running:
+
+```bash
+npm run db:production:backup
+npm run db:production:restore -- backups/<backup-file>.dump --yes
+```
+
+See [docs/VPS_DEPLOYMENT_SECURITY.md](docs/VPS_DEPLOYMENT_SECURITY.md) before restoring production data.
