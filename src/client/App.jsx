@@ -21,7 +21,7 @@ import {
   UserRound,
   UsersRound
 } from "lucide-react";
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -32,24 +32,31 @@ import {
   YAxis
 } from "recharts";
 import {
+  acquireQuoteDraft,
+  archiveQuoteDraft,
   createQuotePreview,
   demoMode,
+  getArchivedQuoteDraft,
   getAuditEvents,
   getBillingQuoteDetail,
   getAnnualInvoices,
   getBillingQuotes,
   getSession,
   getSummary,
+  getQuoteDrafts,
   getXeroStatus,
   login,
   logout,
   refreshSummary,
+  renewQuoteDraft,
+  restoreQuoteDraft,
   sendQuoteToXero,
   syncBillingQuotesXeroStatus,
   syncBillingQuoteXeroStatus,
   updateAnnualInvoiceUsage,
   updateAccount,
   updateQuotePreview,
+  updateQuoteTimeEntriesBillable,
   updateQuoteTimeEntryBillable
 } from "./api.js";
 import { getBillingClients, getXeroReference, updateBillingClient } from "./api.js";
@@ -99,9 +106,10 @@ const billingTabs = [
 ];
 
 const allTabs = [...reportingTabs, ...billingTabs];
-const defaultActiveTab = "reporting-overview";
+const defaultActiveTab = "billing-quotes";
 const activeTabIds = new Set(allTabs.map((tab) => tab.id));
-const activeTabStorageKey = "ziffer.activeTab";
+const activeTabStorageKey = "ziffer.activeTab:v2";
+const editorSessionStorageKey = "ziffer.editorSession:v1";
 
 const disabledNavItems = [
   { id: "ecdf", label: "eCDF", icon: FileText },
@@ -607,6 +615,7 @@ function AnnualServiceSummary({ currencyCode = "EUR", items, mode = "covered", t
 }
 
 function QuoteActionMenu({
+  actions,
   actionDisabled = false,
   actionLabel = "Mark unbillable",
   busy = false,
@@ -617,6 +626,10 @@ function QuoteActionMenu({
   onMarkUnbillable,
   onToggle
 }) {
+  const menuActions = Array.isArray(actions)
+    ? actions
+    : [{ disabled: actionDisabled, label: actionLabel, onClick: onMarkUnbillable }];
+
   return (
     <div className="quote-action-menu">
       <button
@@ -637,9 +650,17 @@ function QuoteActionMenu({
               Edit
             </button>
           ) : null}
-          <button disabled={actionDisabled || busy} role="menuitem" type="button" onClick={onMarkUnbillable}>
-            {busy ? "Saving..." : actionLabel}
-          </button>
+          {menuActions.map((action) => (
+            <button
+              disabled={action.disabled || busy}
+              key={action.label}
+              role="menuitem"
+              type="button"
+              onClick={action.onClick}
+            >
+              {busy ? "Saving..." : action.label}
+            </button>
+          ))}
         </div>
       ) : null}
     </div>
@@ -944,9 +965,29 @@ function titleForTab(tab) {
   return titles[tab] || "Overview";
 }
 
+function routeFromHash(hash = "") {
+  const [tab = "", draftId = ""] = hash.replace(/^#\/?/, "").split("/");
+  return {
+    draftId: tab === "billing-create-quote" ? draftId : "",
+    tab: activeTabIds.has(tab) ? tab : ""
+  };
+}
+
 function activeTabFromHash(hash = "") {
-  const tab = hash.replace(/^#\/?/, "");
-  return activeTabIds.has(tab) ? tab : "";
+  return routeFromHash(hash).tab;
+}
+
+function editorSessionId() {
+  if (typeof window === "undefined") return "";
+  try {
+    const current = window.sessionStorage.getItem(editorSessionStorageKey);
+    if (current) return current;
+    const next = window.crypto.randomUUID();
+    window.sessionStorage.setItem(editorSessionStorageKey, next);
+    return next;
+  } catch {
+    return window.crypto.randomUUID();
+  }
 }
 
 function initialActiveTab() {
@@ -965,7 +1006,7 @@ function initialActiveTab() {
   return defaultActiveTab;
 }
 
-function persistActiveTab(tab) {
+function persistActiveTab(tab, draftId = "") {
   if (typeof window === "undefined" || !activeTabIds.has(tab)) return;
 
   try {
@@ -974,7 +1015,7 @@ function persistActiveTab(tab) {
     // Ignore storage failures; the hash still preserves refresh behavior.
   }
 
-  const nextHash = `#${tab}`;
+  const nextHash = tab === "billing-create-quote" && draftId ? `#${tab}/${draftId}` : `#${tab}`;
   if (window.location.hash !== nextHash) {
     window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${nextHash}`);
   }
@@ -1024,6 +1065,7 @@ function LoginScreen({ onAuthenticated }) {
     setError("");
     try {
       await login(username, password);
+      persistActiveTab("billing-quotes");
       onAuthenticated();
     } catch (err) {
       setError(err.message);
@@ -2038,7 +2080,88 @@ function BillingDocumentDetailModal({ detail, error, loading, onClose, onRefresh
   );
 }
 
-function BillingQuotesView({ loading, onRefresh, quotes }) {
+function DraftLedgerPanel({ archived = false, onOpen, onRestore, rows = [] }) {
+  return (
+    <section className="panel full-panel quotes-panel draft-ledger-panel">
+      <div className="table-toolbar">
+        <div className="table-toolbar-heading">
+          <p>Billing</p>
+          <h2>{archived ? "Archived" : "Drafts"}</h2>
+        </div>
+        <span className="draft-count">{wholeNumber.format(rows.length)} {rows.length === 1 ? "draft" : "drafts"}</span>
+      </div>
+      <div className="table-wrap">
+        <table className="quotes-table draft-ledger-table">
+          <thead>
+            <tr>
+              <th>Document</th><th>Client</th><th>Period</th><th>Amount</th>
+              <th>{archived ? "Archived" : "Last editor"}</th><th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((draft) => (
+              <tr key={draft.id}>
+                <td>
+                  <button className="quote-document-link" onClick={() => onOpen?.(draft)} type="button">{draft.quoteNumber || "Untitled draft"}</button>
+                  <span className="draft-document-type">{xeroDocumentTypeLabel(draft.documentType)}</span>
+                </td>
+                <td>{draft.clientName}</td>
+                <td>{formatPeriod(draft.period?.startDate, draft.period?.endDate)}</td>
+                <td>{formatCurrencyAmount(draft.totals?.amount || 0)}</td>
+                <td>{archived ? formattedDateTime(draft.archivedAt) : draft.lastEditedBy}</td>
+                <td>
+                  {archived ? (
+                    <button className="secondary-button compact-button" onClick={() => onRestore?.(draft)} type="button">Restore</button>
+                  ) : draft.lock?.ownedBySession ? (
+                    <span className="status-pill active">You are editing</span>
+                  ) : draft.lock ? (
+                    <span className="status-pill draft-lock-pill"><LockKeyhole size={13} /> {draft.lock.editorName}</span>
+                  ) : (
+                    <span className="status-pill active">Available</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+            {!rows.length ? <tr><td className="empty-cell" colSpan="6">{archived ? "No archived drafts." : "No active drafts."}</td></tr> : null}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function ArchivedDraftModal({ error, loading, onClose, preview }) {
+  useEscapeToClose(onClose);
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="settings-modal document-detail-modal" aria-modal="true" role="dialog">
+        <header className="settings-modal-header">
+          <div>
+            <p>Archived draft</p>
+            <h2>{preview?.quoteNumber || "Draft"}</h2>
+            {preview ? <span>{preview.billingClient?.displayName} | {formatPeriod(preview.period?.startDate, preview.period?.endDate)}</span> : null}
+          </div>
+          <button aria-label="Close archived draft" className="icon-button" onClick={onClose} type="button"><X size={18} /></button>
+        </header>
+        {loading ? <div className="loading-state inline-loading"><Loader2 className="spin" size={20} /><span>Loading archived draft</span></div> : null}
+        {error ? <p className="form-error">{error}</p> : null}
+        {preview && !loading ? (
+          <Fragment>
+            <div className="document-detail-summary">
+              <ClientStatsCard label="Amount" value={formatCurrencyAmount(preview.totals?.amount || 0, preview.currency)} />
+              <ClientStatsCard label="Hours" value={formatHours(preview.totals?.totalHours || 0)} />
+              <ClientStatsCard label="Lines" value={wholeNumber.format(preview.lines?.length || 0)} />
+              <ClientStatsCard label="Last saved" value={formattedDateTime(preview.updatedAt)} />
+            </div>
+            <DocumentSentLinesTable currencyCode={preview.currency} lines={preview.lines || []} />
+          </Fragment>
+        ) : null}
+      </section>
+    </div>
+  );
+}
+
+function BillingQuotesView({ archivedDrafts = [], drafts = [], loading, onOpenDraft, onRefresh, onRestoreDraft, quotes }) {
   const rows = quotes || [];
   const [clientFilter, setClientFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -2047,6 +2170,10 @@ function BillingQuotesView({ loading, onRefresh, quotes }) {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
   const [refreshingStatus, setRefreshingStatus] = useState(false);
+  const [archivedPreview, setArchivedPreview] = useState(null);
+  const [archivedLoading, setArchivedLoading] = useState(false);
+  const [archivedError, setArchivedError] = useState("");
+  const [draftMessage, setDraftMessage] = useState("");
   const clientOptions = useMemo(() => {
     const options = new Map();
 
@@ -2124,6 +2251,33 @@ function BillingQuotesView({ loading, onRefresh, quotes }) {
     }
   }
 
+  async function openDraft(draft) {
+    setDraftMessage("");
+    if (draft.lock && !draft.lock.ownedBySession) {
+      setDraftMessage(`This draft is currently being edited by ${draft.lock.editorName}. It can be opened after ${formattedDateTime(draft.lock.expiresAt)}.`);
+      return;
+    }
+    try {
+      await onOpenDraft?.(draft);
+    } catch (error) {
+      setDraftMessage(error.message);
+    }
+  }
+
+  async function openArchivedDraft(draft) {
+    setArchivedPreview(null);
+    setArchivedError("");
+    setArchivedLoading(true);
+    try {
+      const payload = await getArchivedQuoteDraft(draft.id);
+      setArchivedPreview(payload.preview || null);
+    } catch (error) {
+      setArchivedError(error.message);
+    } finally {
+      setArchivedLoading(false);
+    }
+  }
+
   return (
     <Fragment>
       <div className="client-stat-grid docs-stat-grid" aria-label="Document ledger summary">
@@ -2140,6 +2294,8 @@ function BillingQuotesView({ loading, onRefresh, quotes }) {
         />
         <ClientStatsCard label="Teamwork estimate" value={formatCurrencyAmount(totals.totalTeamworkEstimate || 0)} />
       </div>
+
+      {draftMessage ? <div className="error-banner">{draftMessage}</div> : null}
 
       <section className="panel full-panel quotes-panel">
         <div className="table-toolbar">
@@ -2229,6 +2385,9 @@ function BillingQuotesView({ loading, onRefresh, quotes }) {
         </div>
       </section>
 
+      <DraftLedgerPanel onOpen={openDraft} rows={drafts} />
+      <DraftLedgerPanel archived onOpen={openArchivedDraft} onRestore={onRestoreDraft} rows={archivedDrafts} />
+
       {selectedQuoteId ? (
         <BillingDocumentDetailModal
           detail={selectedDetail}
@@ -2241,6 +2400,18 @@ function BillingQuotesView({ loading, onRefresh, quotes }) {
             setDetailError("");
           }}
           onRefreshStatus={refreshSelectedStatus}
+        />
+      ) : null}
+      {archivedPreview || archivedLoading || archivedError ? (
+        <ArchivedDraftModal
+          error={archivedError}
+          loading={archivedLoading}
+          onClose={() => {
+            setArchivedPreview(null);
+            setArchivedError("");
+            setArchivedLoading(false);
+          }}
+          preview={archivedPreview}
         />
       ) : null}
     </Fragment>
@@ -2273,7 +2444,18 @@ function clientOptionKey(client) {
   return `${client.displayName || ""} ${client.xeroClientName || ""}`.toLowerCase();
 }
 
-function BillingCreateQuoteView({ annualYears = [], clients, loading, onPreviewCreated, xeroTaxRates = [] }) {
+function BillingCreateQuoteView({
+  annualYears = [],
+  clients,
+  editorSession,
+  loading,
+  onArchive,
+  onSaveControllerChange,
+  onPreviewChange,
+  onPreviewCreated,
+  preview,
+  xeroTaxRates = []
+}) {
   const defaultRange = useMemo(() => lastMonthRange(), []);
   const activeClients = useMemo(
     () => clients.filter((client) => statusForClient(client) === "active"),
@@ -2285,7 +2467,6 @@ function BillingCreateQuoteView({ annualYears = [], clients, loading, onPreviewC
   const [startDate, setStartDate] = useState(defaultRange.startDate);
   const [endDate, setEndDate] = useState(defaultRange.endDate);
   const [generating, setGenerating] = useState(false);
-  const [preview, setPreview] = useState(null);
   const [error, setError] = useState("");
   const selectedClient = useMemo(
     () => activeClients.find((client) => client.id === billingClientId) || null,
@@ -2329,8 +2510,14 @@ function BillingCreateQuoteView({ annualYears = [], clients, loading, onPreviewC
     setGenerating(true);
     setError("");
     try {
-      const payload = await createQuotePreview({ billingClientId, endDate, startDate });
-      setPreview(payload.preview);
+      const payload = await createQuotePreview({
+        billingClientId,
+        documentType: "draft_invoice",
+        editorSessionId: editorSession,
+        endDate,
+        startDate
+      });
+      onPreviewChange?.(payload.preview);
       onPreviewCreated?.(payload.preview);
     } catch (err) {
       setError(err.message);
@@ -2423,18 +2610,28 @@ function BillingCreateQuoteView({ annualYears = [], clients, loading, onPreviewC
         {error ? <p className="form-error">{error}</p> : null}
       </section>
 
-      {preview ? <QuotePreview annualYears={annualYears} preview={preview} xeroTaxRates={xeroTaxRates} /> : null}
+      {preview ? (
+        <QuotePreview
+          annualYears={annualYears}
+          editorSession={editorSession}
+          onArchive={onArchive}
+          onSaveControllerChange={onSaveControllerChange}
+          onPreviewChange={onPreviewChange}
+          preview={preview}
+          xeroTaxRates={xeroTaxRates}
+        />
+      ) : null}
     </Fragment>
   );
 }
 
-function QuotePreview({ annualYears = [], preview, xeroTaxRates = [] }) {
+function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewChange, onSaveControllerChange, preview, xeroTaxRates = [] }) {
   const initialTotals = preview.totals || {};
   const initialWarnings = preview.warnings || [];
   const lines = preview.lines || [];
   const serviceOptions = preview.services || [];
   const currencyCode = preview.currency || preview.billingClient?.currency || "EUR";
-  const [openLineKeys, setOpenLineKeys] = useState(() => new Set(lines.map(quoteLineKey)));
+  const [openLineKeys, setOpenLineKeys] = useState(() => new Set());
   const [quoteLines, setQuoteLines] = useState(lines);
   const [quoteTotalsBase, setQuoteTotalsBase] = useState(initialTotals);
   const [quoteWarnings, setQuoteWarnings] = useState(initialWarnings);
@@ -2451,7 +2648,7 @@ function QuotePreview({ annualYears = [], preview, xeroTaxRates = [] }) {
   const [sendError, setSendError] = useState("");
   const [sendResult, setSendResult] = useState(null);
   const [sendingToXero, setSendingToXero] = useState(false);
-  const [xeroDocumentType, setXeroDocumentType] = useState("draft_invoice");
+  const [xeroDocumentType, setXeroDocumentType] = useState(preview.documentType || "draft_invoice");
   const [xeroStatus, setXeroStatus] = useState(null);
   const [metadata, setMetadata] = useState(() => ({
     expiryDate: preview.expiryDate || "",
@@ -2472,6 +2669,15 @@ function QuotePreview({ annualYears = [], preview, xeroTaxRates = [] }) {
   const visibleWarnings = quoteWarnings.filter((warning) => warning.type !== "missing_service");
   const [metadataError, setMetadataError] = useState("");
   const [metadataSaving, setMetadataSaving] = useState(false);
+  const [saveState, setSaveState] = useState("saved");
+  const versionRef = useRef(Number(preview.version || 1));
+  const saveQueueRef = useRef(Promise.resolve());
+  const metadataTimerRef = useRef(null);
+  const metadataRef = useRef(metadata);
+  const lastFailedOperationRef = useRef(null);
+  const lastSaveErrorRef = useRef(null);
+  const pendingSaveCountRef = useRef(0);
+  const lastLockRenewalRef = useRef(0);
   const quoteIsLocked = quoteStatus !== "preview";
   const selectedXeroDocumentLabel = xeroDocumentTypeLabel(xeroDocumentType);
   const isDraftQuote = xeroDocumentType === "draft_quote";
@@ -2479,9 +2685,15 @@ function QuotePreview({ annualYears = [], preview, xeroTaxRates = [] }) {
   const documentDateLabel = isDraftQuote ? "Quote date" : "Invoice date";
   const documentExpiryLabel = isDraftQuote ? "Expiry date" : "Due date";
 
+  metadataRef.current = metadata;
+
   useEffect(() => {
-    setOpenLineKeys(new Set(lines.map(quoteLineKey)));
-  }, [lines]);
+    setOpenLineKeys(new Set());
+    saveQueueRef.current = Promise.resolve();
+    lastFailedOperationRef.current = null;
+    lastSaveErrorRef.current = null;
+    pendingSaveCountRef.current = 0;
+  }, [preview.id]);
 
   useEffect(() => {
     setQuoteLines(lines);
@@ -2498,8 +2710,15 @@ function QuotePreview({ annualYears = [], preview, xeroTaxRates = [] }) {
     setSendError("");
     setSendResult(null);
     setSendingToXero(false);
-    setXeroDocumentType("draft_invoice");
+    setXeroDocumentType(preview.documentType || "draft_invoice");
+    versionRef.current = Number(preview.version || 1);
+    if (lastSaveErrorRef.current) setSaveState("error");
+    else setSaveState(pendingSaveCountRef.current ? "saving" : "saved");
   }, [lines, preview.id, preview.totals, preview.warnings]);
+
+  useEffect(() => {
+    versionRef.current = Number(preview.version || versionRef.current || 1);
+  }, [preview.version]);
 
   useEffect(() => {
     setMetadata({
@@ -2527,6 +2746,74 @@ function QuotePreview({ annualYears = [], preview, xeroTaxRates = [] }) {
     };
   }, []);
 
+  useEffect(() => {
+    function warnForUnsavedChanges(event) {
+      if (saveState === "saved" && !metadataTimerRef.current) return;
+      event.preventDefault();
+      event.returnValue = "";
+    }
+    window.addEventListener("beforeunload", warnForUnsavedChanges);
+    return () => window.removeEventListener("beforeunload", warnForUnsavedChanges);
+  }, [saveState]);
+
+  useEffect(() => {
+    onSaveControllerChange?.({ flush: flushPendingChanges });
+    return () => onSaveControllerChange?.(null);
+  }, [onSaveControllerChange, preview.id]);
+
+  function lifecycleInput(input = {}) {
+    return {
+      ...input,
+      editorSessionId: editorSession,
+      version: versionRef.current
+    };
+  }
+
+  function mergePreviewForParent(nextPreview = {}) {
+    if (nextPreview.version) versionRef.current = Number(nextPreview.version);
+    onPreviewChange?.(nextPreview);
+  }
+
+  function runDraftMutation(operation) {
+    pendingSaveCountRef.current += 1;
+    setSaveState("saving");
+    const pending = saveQueueRef.current
+      .catch(() => undefined)
+      .then(() => operation(lifecycleInput()))
+      .then((payload) => {
+        if (payload?.preview) mergePreviewForParent(payload.preview);
+        if (lastFailedOperationRef.current === operation) {
+          lastFailedOperationRef.current = null;
+          lastSaveErrorRef.current = null;
+        }
+        return payload;
+      })
+      .catch((error) => {
+        lastFailedOperationRef.current = operation;
+        lastSaveErrorRef.current = error;
+        throw error;
+      })
+      .finally(() => {
+        pendingSaveCountRef.current = Math.max(0, pendingSaveCountRef.current - 1);
+        if (lastSaveErrorRef.current) setSaveState("error");
+        else setSaveState(pendingSaveCountRef.current ? "saving" : "saved");
+      });
+    saveQueueRef.current = pending;
+    return pending;
+  }
+
+  function renewEditorLock() {
+    const now = Date.now();
+    if (!preview.id || now - lastLockRenewalRef.current < 60_000) return;
+    lastLockRenewalRef.current = now;
+    renewQuoteDraft(preview.id, editorSession).catch((error) => {
+      if (error.code === "DRAFT_LOCKED") {
+        setMetadataError(error.message);
+        setSaveState("error");
+      }
+    });
+  }
+
   function toggleLine(line) {
     const key = quoteLineKey(line);
     setOpenLineKeys((current) => {
@@ -2547,7 +2834,10 @@ function QuotePreview({ annualYears = [], preview, xeroTaxRates = [] }) {
     setQuoteTotalsBase(nextPreview.totals || {});
     setQuoteWarnings(nextPreview.warnings || []);
     setLineDiscountDrafts(Object.fromEntries(nextLines.map((line) => [line.id, decimal.format(line.discount || 0)])));
-    setOpenLineKeys(new Set(nextLines.map(quoteLineKey)));
+    setOpenLineKeys((current) => {
+      const validKeys = new Set(nextLines.map(quoteLineKey));
+      return new Set([...current].filter((key) => validKeys.has(key)));
+    });
     setOpenActionMenuKey("");
   }
 
@@ -2585,27 +2875,70 @@ function QuotePreview({ annualYears = [], preview, xeroTaxRates = [] }) {
     setMetadataSaving(true);
     setMetadataError("");
     try {
-      const payload = await updateQuotePreview(preview.id, nextMetadata);
+      const payload = await runDraftMutation((lifecycle) => updateQuotePreview(preview.id, { ...nextMetadata, ...lifecycle }));
       const { lines: _lines, totals: _totals, ...savedMetadata } = payload.preview || {};
       setMetadata((current) => ({ ...current, ...savedMetadata }));
+      return payload;
     } catch (err) {
       setMetadataError(err.message);
+      throw err;
     } finally {
       setMetadataSaving(false);
     }
   }
 
+  function scheduleMetadataSave(nextMetadata) {
+    if (metadataTimerRef.current) window.clearTimeout(metadataTimerRef.current);
+    setSaveState("saving");
+    metadataTimerRef.current = window.setTimeout(() => {
+      metadataTimerRef.current = null;
+      saveMetadata(nextMetadata).catch(() => undefined);
+    }, 600);
+  }
+
+  function flushMetadata(nextMetadata = metadata) {
+    if (metadataTimerRef.current) {
+      window.clearTimeout(metadataTimerRef.current);
+      metadataTimerRef.current = null;
+    }
+    return saveMetadata(nextMetadata);
+  }
+
+  async function flushPendingChanges() {
+    if (metadataTimerRef.current) {
+      await flushMetadata(metadataRef.current);
+    }
+    await saveQueueRef.current;
+    if (lastSaveErrorRef.current) throw lastSaveErrorRef.current;
+  }
+
+  async function retryLastSave() {
+    const operation = lastFailedOperationRef.current;
+    if (!operation) return;
+    setMetadataError("");
+    setLineError("");
+    try {
+      await runDraftMutation(operation);
+    } catch (error) {
+      setMetadataError(error.message);
+    }
+  }
+
   function updateMetadata(field, value) {
-    setMetadata((current) => ({ ...current, [field]: value }));
+    const next = { ...metadata, [field]: value };
+    setMetadata(next);
+    scheduleMetadataSave(next);
     setMetadataError("");
   }
 
   function updateQuoteDate(value) {
-    setMetadata((current) => ({
-      ...current,
+    const next = {
+      ...metadata,
       expiryDate: addDaysToDate(value, 14),
       quoteDate: value
-    }));
+    };
+    setMetadata(next);
+    scheduleMetadataSave(next);
     setMetadataError("");
   }
 
@@ -2630,9 +2963,10 @@ function QuotePreview({ annualYears = [], preview, xeroTaxRates = [] }) {
     setLineError("");
 
     try {
-      const payload = await updateQuotePreview(preview.id, {
+      const payload = await runDraftMutation((lifecycle) => updateQuotePreview(preview.id, {
+        ...lifecycle,
         lines: [{ discount, id: line.id }]
-      });
+      }));
       mergeLinePreviewUpdate(payload.preview || {});
       setLineDiscountDrafts((current) => ({ ...current, [line.id]: decimal.format(discount) }));
     } catch (err) {
@@ -2654,14 +2988,15 @@ function QuotePreview({ annualYears = [], preview, xeroTaxRates = [] }) {
     setLineError("");
 
     try {
-      const payload = await updateQuotePreview(preview.id, {
+      const payload = await runDraftMutation((lifecycle) => updateQuotePreview(preview.id, {
+        ...lifecycle,
         lines: [
           {
             ...draft,
             id: line.id
           }
         ]
-      });
+      }));
       mergeLinePreviewUpdate(payload.preview || {});
     } catch (err) {
       setLineError(err.message);
@@ -2681,14 +3016,15 @@ function QuotePreview({ annualYears = [], preview, xeroTaxRates = [] }) {
     setLineError("");
 
     try {
-      const payload = await updateQuotePreview(preview.id, {
+      const payload = await runDraftMutation((lifecycle) => updateQuotePreview(preview.id, {
+        ...lifecycle,
         lines: [
           {
             ...draft,
             sourceType: "manual"
           }
         ]
-      });
+      }));
       mergeLinePreviewUpdate(payload.preview || {});
     } catch (err) {
       setLineError(err.message);
@@ -2704,7 +3040,9 @@ function QuotePreview({ annualYears = [], preview, xeroTaxRates = [] }) {
     setOpenActionMenuKey("");
 
     try {
-      const payload = await updateQuoteTimeEntryBillable(preview.id, entry.id, nextIsBillable);
+      const payload = await runDraftMutation((lifecycle) =>
+        updateQuoteTimeEntryBillable(preview.id, entry.id, nextIsBillable, lifecycle)
+      );
       applyPreviewUpdate(payload.preview || {});
     } catch (err) {
       setLineError(err.message);
@@ -2717,8 +3055,8 @@ function QuotePreview({ annualYears = [], preview, xeroTaxRates = [] }) {
     }
   }
 
-  async function markLineUnbillable(line) {
-    const entriesToUpdate = (line.entries || []).filter((entry) => entry.isBillable);
+  async function setLineBillable(line, nextIsBillable) {
+    const entriesToUpdate = (line.entries || []).filter((entry) => entry.isBillable !== nextIsBillable);
     if (!preview.id || !line?.id || !entriesToUpdate.length || quoteIsLocked) return;
 
     setSavingLineIds((current) => new Set(current).add(line.id));
@@ -2730,15 +3068,17 @@ function QuotePreview({ annualYears = [], preview, xeroTaxRates = [] }) {
     setLineError("");
     setOpenActionMenuKey("");
 
-    let latestPreview = null;
     try {
-      for (const entry of entriesToUpdate) {
-        const payload = await updateQuoteTimeEntryBillable(preview.id, entry.id, false);
-        latestPreview = payload.preview || latestPreview;
-      }
-      if (latestPreview) applyPreviewUpdate(latestPreview);
+      const payload = await runDraftMutation((lifecycle) =>
+        updateQuoteTimeEntriesBillable(
+          preview.id,
+          entriesToUpdate.map((entry) => entry.id),
+          nextIsBillable,
+          lifecycle
+        )
+      );
+      applyPreviewUpdate(payload.preview || {});
     } catch (err) {
-      if (latestPreview) applyPreviewUpdate(latestPreview);
       setLineError(err.message);
     } finally {
       setSavingLineIds((current) => {
@@ -2762,14 +3102,42 @@ function QuotePreview({ annualYears = [], preview, xeroTaxRates = [] }) {
     setSendResult(null);
 
     try {
-      await updateQuotePreview(preview.id, metadata);
-      const payload = await sendQuoteToXero(preview.id, { documentType: xeroDocumentType });
+      await flushMetadata(metadata);
+      const payload = await runDraftMutation((lifecycle) => sendQuoteToXero(preview.id, {
+        ...lifecycle,
+        documentType: xeroDocumentType
+      }));
       setQuoteStatus(payload.preview?.status || "approved_for_xero");
       setSendResult(payload.xero || null);
     } catch (err) {
       setSendError(err.message);
     } finally {
       setSendingToXero(false);
+    }
+  }
+
+  async function handleDocumentTypeChange(value) {
+    setXeroDocumentType(value);
+    setMetadataError("");
+    try {
+      await runDraftMutation((lifecycle) => updateQuotePreview(preview.id, {
+        ...lifecycle,
+        documentType: value
+      }));
+    } catch (error) {
+      setMetadataError(error.message);
+    }
+  }
+
+  async function handleArchiveDraft() {
+    if (!preview.id || quoteIsLocked) return;
+    setMetadataError("");
+    try {
+      await flushMetadata(metadata);
+      await runDraftMutation((lifecycle) => archiveQuoteDraft(preview.id, lifecycle));
+      onArchive?.(preview.id);
+    } catch (error) {
+      setMetadataError(error.message);
     }
   }
 
@@ -2782,7 +3150,11 @@ function QuotePreview({ annualYears = [], preview, xeroTaxRates = [] }) {
         <ClientStatsCard label="Lines" value={wholeNumber.format(quoteTotals.lineCount || 0)} />
       </div>
 
-      <section className="panel full-panel quote-preview-panel">
+      <section
+        className="panel full-panel quote-preview-panel"
+        onKeyDown={renewEditorLock}
+        onPointerDown={renewEditorLock}
+      >
         <div className="panel-heading">
           <div>
             <p>{selectedXeroDocumentLabel}</p>
@@ -2808,7 +3180,7 @@ function QuotePreview({ annualYears = [], preview, xeroTaxRates = [] }) {
                 aria-label="Xero document type"
                 disabled={sendingToXero || quoteIsLocked}
                 value={xeroDocumentType}
-                onChange={(event) => setXeroDocumentType(event.target.value)}
+                onChange={(event) => handleDocumentTypeChange(event.target.value)}
               >
                 {xeroDocumentTypeOptions.map((option) => (
                   <option key={option.value} value={option.value}>
@@ -2817,6 +3189,15 @@ function QuotePreview({ annualYears = [], preview, xeroTaxRates = [] }) {
                 ))}
               </select>
             </label>
+            <span className={`draft-save-state draft-save-state--${saveState}`} role="status">
+              {saveState === "saving" ? "Saving…" : saveState === "error" ? "Couldn’t save" : "Saved"}
+            </span>
+            {saveState === "error" && lastFailedOperationRef.current ? (
+              <button className="secondary-button compact-button" onClick={retryLastSave} type="button">Retry</button>
+            ) : null}
+            <button className="secondary-button" disabled={metadataSaving || quoteIsLocked} onClick={handleArchiveDraft} type="button">
+              Archive
+            </button>
             <button
               className="primary-action-button"
               disabled={sendingToXero || metadataSaving || quoteIsLocked}
@@ -2841,7 +3222,7 @@ function QuotePreview({ annualYears = [], preview, xeroTaxRates = [] }) {
                 aria-label={documentNumberLabel}
                 disabled={metadataSaving || quoteIsLocked}
                 value={metadata.quoteNumber}
-                onBlur={(event) => saveMetadata({ ...metadata, quoteNumber: event.target.value })}
+                onBlur={(event) => flushMetadata({ ...metadata, quoteNumber: event.target.value }).catch(() => undefined)}
                 onChange={(event) => updateMetadata("quoteNumber", event.target.value)}
               />
             </dd>
@@ -2853,7 +3234,7 @@ function QuotePreview({ annualYears = [], preview, xeroTaxRates = [] }) {
                 aria-label="Document reference"
                 disabled={metadataSaving || quoteIsLocked}
                 value={metadata.reference}
-                onBlur={(event) => saveMetadata({ ...metadata, reference: event.target.value })}
+                onBlur={(event) => flushMetadata({ ...metadata, reference: event.target.value }).catch(() => undefined)}
                 onChange={(event) => updateMetadata("reference", event.target.value)}
               />
             </dd>
@@ -2867,11 +3248,11 @@ function QuotePreview({ annualYears = [], preview, xeroTaxRates = [] }) {
                 type="date"
                 value={metadata.quoteDate}
                 onBlur={(event) =>
-                  saveMetadata({
+                  flushMetadata({
                     ...metadata,
                     expiryDate: addDaysToDate(event.target.value, 14),
                     quoteDate: event.target.value
-                  })
+                  }).catch(() => undefined)
                 }
                 onChange={(event) => updateQuoteDate(event.target.value)}
                 onInput={(event) => updateQuoteDate(event.currentTarget.value)}
@@ -2886,7 +3267,7 @@ function QuotePreview({ annualYears = [], preview, xeroTaxRates = [] }) {
                 disabled={metadataSaving || quoteIsLocked}
                 type="date"
                 value={metadata.expiryDate}
-                onBlur={(event) => saveMetadata({ ...metadata, expiryDate: event.target.value })}
+                onBlur={(event) => flushMetadata({ ...metadata, expiryDate: event.target.value }).catch(() => undefined)}
                 onChange={(event) => updateMetadata("expiryDate", event.target.value)}
               />
             </dd>
@@ -2958,11 +3339,28 @@ function QuotePreview({ annualYears = [], preview, xeroTaxRates = [] }) {
                 const entries = line.entries || [];
                 const isOpen = openLineKeys.has(key);
                 const lineActionKey = `line:${key}`;
+                const canMarkLineBillable = entries.some((entry) => !entry.isBillable);
                 const canMarkLineUnbillable = entries.some((entry) => entry.isBillable);
                 return (
                   <Fragment key={key}>
                     <tr className={`quote-task-row${line.annualCovered ? " quote-task-row--annual-covered" : ""}`}>
-                      <td className="quote-comment-cell">{documentLineComment(line)}</td>
+                      <td className="quote-comment-cell">
+                        <div className="quote-entry-comment-action">
+                          {canMarkLineBillable ? (
+                            <button
+                              aria-label={`Mark task as billable: ${line.taskName || line.description || "document line"}`}
+                              className="icon-only-button quote-entry-billable-button"
+                              disabled={savingLineIds.has(line.id) || quoteIsLocked}
+                              title="Mark task as billable"
+                              type="button"
+                              onClick={() => setLineBillable(line, true)}
+                            >
+                              {savingLineIds.has(line.id) ? <Loader2 className="spin" size={14} /> : <RefreshCw size={14} />}
+                            </button>
+                          ) : null}
+                          <span>{documentLineComment(line)}</span>
+                        </div>
+                      </td>
                       <td className="quote-task-cell">
                         <button
                           aria-expanded={isOpen}
@@ -3000,8 +3398,12 @@ function QuotePreview({ annualYears = [], preview, xeroTaxRates = [] }) {
                       <td>{formatCurrencyAmount(line.amount, currencyCode)}</td>
                       <td className="quote-action-cell">
                         <QuoteActionMenu
-                          actionDisabled={!canMarkLineUnbillable || quoteIsLocked || savingLineIds.has(line.id)}
-                          actionLabel={canMarkLineUnbillable ? "Mark unbillable" : "Already unbillable"}
+                          actions={[
+                            ...(canMarkLineUnbillable ? [{
+                              label: "Mark task unbillable",
+                              onClick: () => setLineBillable(line, false)
+                            }] : [])
+                          ]}
                           busy={savingLineIds.has(line.id)}
                           disabled={quoteIsLocked || savingLineIds.has(line.id)}
                           isOpen={openActionMenuKey === lineActionKey}
@@ -3010,7 +3412,6 @@ function QuotePreview({ annualYears = [], preview, xeroTaxRates = [] }) {
                             setEditingLine(line);
                             setOpenActionMenuKey("");
                           }}
-                          onMarkUnbillable={() => markLineUnbillable(line)}
                           onToggle={() => toggleActionMenu(lineActionKey)}
                         />
                       </td>
@@ -4126,6 +4527,16 @@ function AnnualInvoicesView() {
 
 function Shell({ onLogout, onUserUpdated, user }) {
   const [activeTab, setActiveTab] = useState(initialActiveTab);
+  const [currentDraftId, setCurrentDraftId] = useState(() => typeof window === "undefined" ? "" : routeFromHash(window.location.hash).draftId);
+  const [currentDraft, setCurrentDraft] = useState(null);
+  const [drafts, setDrafts] = useState([]);
+  const [archivedDrafts, setArchivedDrafts] = useState([]);
+  const [draftLoading, setDraftLoading] = useState(false);
+  const [editorSession] = useState(editorSessionId);
+  const draftSaveControllerRef = useRef(null);
+  const activeTabRef = useRef(activeTab);
+  const currentDraftIdRef = useRef(currentDraftId);
+  const hashNavigationVersionRef = useRef(0);
   const [range, setRange] = useState({ endDate: today(), startDate: "2026-01-01" });
   const [report, setReport] = useState(null);
   const [billingClients, setBillingClients] = useState([]);
@@ -4149,6 +4560,9 @@ function Shell({ onLogout, onUserUpdated, user }) {
     () => billingQuotes.filter((quote) => quoteMatchesRange(quote, range)),
     [billingQuotes, range.endDate, range.startDate]
   );
+
+  activeTabRef.current = activeTab;
+  currentDraftIdRef.current = currentDraftId;
 
   async function loadSummary(nextRange = range) {
     setLoading(true);
@@ -4194,6 +4608,86 @@ function Shell({ onLogout, onUserUpdated, user }) {
     }
   }
 
+  async function loadQuoteDraftLists() {
+    try {
+      const payload = await getQuoteDrafts(editorSession);
+      setDrafts(payload.drafts || []);
+      setArchivedDrafts(payload.archived || []);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  function mergeCurrentDraft(nextPreview) {
+    if (!nextPreview) return;
+    if (nextPreview.status && nextPreview.status !== "preview") {
+      setCurrentDraft(null);
+      setCurrentDraftId("");
+      setActiveTab("billing-quotes");
+      loadBillingQuotes();
+      loadQuoteDraftLists();
+      return;
+    }
+    setCurrentDraft((current) => {
+      if (!current || current.id !== nextPreview.id) return nextPreview;
+      return {
+        ...current,
+        ...nextPreview,
+        billingClient: nextPreview.billingClient || current.billingClient,
+        lines: nextPreview.lines || current.lines,
+        period: nextPreview.period || current.period,
+        services: nextPreview.services || current.services,
+        totals: nextPreview.totals || current.totals,
+        warnings: nextPreview.warnings || current.warnings
+      };
+    });
+    if (nextPreview.id) setCurrentDraftId(nextPreview.id);
+  }
+
+  async function openDraft(draft) {
+    setDraftLoading(true);
+    setError("");
+    try {
+      const payload = await acquireQuoteDraft(draft.id, editorSession);
+      setCurrentDraft(payload.preview);
+      setCurrentDraftId(draft.id);
+      setActiveTab("billing-create-quote");
+      persistActiveTab("billing-create-quote", draft.id);
+    } catch (err) {
+      setError(err.message);
+      throw err;
+    } finally {
+      setDraftLoading(false);
+    }
+  }
+
+  async function restoreDraft(draft) {
+    setDraftLoading(true);
+    setError("");
+    try {
+      const payload = await restoreQuoteDraft(draft.id, {
+        editorSessionId: editorSession,
+        version: draft.version
+      });
+      setCurrentDraft(payload.preview);
+      setCurrentDraftId(draft.id);
+      setActiveTab("billing-create-quote");
+      persistActiveTab("billing-create-quote", draft.id);
+      await loadQuoteDraftLists();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDraftLoading(false);
+    }
+  }
+
+  function handleDraftArchived() {
+    setCurrentDraft(null);
+    setCurrentDraftId("");
+    setActiveTab("billing-quotes");
+    loadQuoteDraftLists();
+  }
+
   async function refreshBillingQuotesFromXero() {
     setBillingQuotesLoading(true);
     setError("");
@@ -4227,6 +4721,8 @@ function Shell({ onLogout, onUserUpdated, user }) {
   }
 
   function handlePreviewCreated(preview) {
+    mergeCurrentDraft(preview);
+    if (preview?.id) persistActiveTab("billing-create-quote", preview.id);
     const clientId = preview?.billingClient?.id;
     if (!clientId) return;
     setBillingClients((current) =>
@@ -4253,19 +4749,93 @@ function Shell({ onLogout, onUserUpdated, user }) {
     setNavGroupsOpen((current) => ({ ...current, [group]: !current[group] }));
   }
 
+  const registerDraftSaveController = useCallback((controller) => {
+    draftSaveControllerRef.current = controller;
+  }, []);
+
+  async function flushDraftBeforeLeaving() {
+    if (activeTab !== "billing-create-quote" || !draftSaveControllerRef.current) return true;
+    try {
+      await draftSaveControllerRef.current.flush();
+      return true;
+    } catch (saveError) {
+      setError(`Couldn’t leave this draft because its latest changes were not saved. ${saveError.message}`);
+      return false;
+    }
+  }
+
+  async function navigateToTab(nextTab) {
+    if (nextTab === activeTab) return;
+    if (!(await flushDraftBeforeLeaving())) return;
+    setError("");
+    setActiveTab(nextTab);
+  }
+
+  async function handleLogoutRequest() {
+    if (!(await flushDraftBeforeLeaving())) return;
+    await onLogout(editorSession);
+  }
+
   useEffect(() => {
-    persistActiveTab(activeTab);
-  }, [activeTab]);
+    persistActiveTab(activeTab, activeTab === "billing-create-quote" ? currentDraftId : "");
+  }, [activeTab, currentDraftId]);
 
   useEffect(() => {
     function handleHashChange() {
-      const hashTab = activeTabFromHash(window.location.hash);
-      if (hashTab) setActiveTab(hashTab);
+      const navigationVersion = hashNavigationVersionRef.current + 1;
+      hashNavigationVersionRef.current = navigationVersion;
+      const route = routeFromHash(window.location.hash);
+      if (!route.tab) return;
+
+      const previousTab = activeTabRef.current;
+      const previousDraftId = currentDraftIdRef.current;
+      const leavingCurrentDraft = previousTab === "billing-create-quote" && (
+        route.tab !== "billing-create-quote" || (route.draftId && route.draftId !== previousDraftId)
+      );
+
+      Promise.resolve()
+        .then(async () => {
+          if (leavingCurrentDraft && draftSaveControllerRef.current) {
+            await draftSaveControllerRef.current.flush();
+          }
+          if (hashNavigationVersionRef.current !== navigationVersion) return;
+          setError("");
+          setActiveTab(route.tab);
+          if (route.draftId) setCurrentDraftId(route.draftId);
+        })
+        .catch((saveError) => {
+          if (hashNavigationVersionRef.current !== navigationVersion) return;
+          const previousHash = previousTab === "billing-create-quote" && previousDraftId
+            ? `#billing-create-quote/${previousDraftId}`
+            : `#${previousTab}`;
+          window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${previousHash}`);
+          setError(`Couldn't leave this draft because its latest changes were not saved. ${saveError.message}`);
+        });
     }
 
     window.addEventListener("hashchange", handleHashChange);
     return () => window.removeEventListener("hashchange", handleHashChange);
   }, []);
+
+  useEffect(() => {
+    if (activeTab !== "billing-create-quote" || !currentDraftId || currentDraft?.id === currentDraftId) return;
+    let cancelled = false;
+    setDraftLoading(true);
+    setError("");
+    acquireQuoteDraft(currentDraftId, editorSession)
+      .then((payload) => {
+        if (!cancelled) setCurrentDraft(payload.preview || null);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err.message);
+      })
+      .finally(() => {
+        if (!cancelled) setDraftLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, currentDraft?.id, currentDraftId, editorSession]);
 
   useEffect(() => {
     if (isReportingTab) loadSummary(range);
@@ -4280,7 +4850,10 @@ function Shell({ onLogout, onUserUpdated, user }) {
   }, [activeTab]);
 
   useEffect(() => {
-    if (activeTab === "billing-quotes") loadBillingQuotes();
+    if (activeTab === "billing-quotes") {
+      loadBillingQuotes();
+      loadQuoteDraftLists();
+    }
   }, [activeTab]);
 
   return (
@@ -4311,7 +4884,7 @@ function Shell({ onLogout, onUserUpdated, user }) {
                     <button
                       className={`nav-subitem ${activeTab === tab.id ? "active" : ""}`}
                       key={tab.id}
-                      onClick={() => setActiveTab(tab.id)}
+                      onClick={() => navigateToTab(tab.id)}
                       title={tab.label}
                       type="button"
                     >
@@ -4342,7 +4915,7 @@ function Shell({ onLogout, onUserUpdated, user }) {
                     <button
                       className={`nav-subitem ${activeTab === tab.id ? "active" : ""}`}
                       key={tab.id}
-                      onClick={() => setActiveTab(tab.id)}
+                      onClick={() => navigateToTab(tab.id)}
                       title={tab.label}
                       type="button"
                     >
@@ -4372,7 +4945,7 @@ function Shell({ onLogout, onUserUpdated, user }) {
             <span className="rail-user-name">{user?.name || user?.email || "Account"}</span>
           </button>
           {demoMode ? null : (
-            <button aria-label="Sign out" onClick={onLogout} type="button">
+            <button aria-label="Sign out" onClick={handleLogoutRequest} type="button">
               <LogOut size={17} />
             </button>
           )}
@@ -4399,7 +4972,23 @@ function Shell({ onLogout, onUserUpdated, user }) {
         </header>
 
         {error ? <div className="error-banner">{error}</div> : null}
-        {isReportingTab && loading && !report ? (
+        {activeTab === "billing-create-quote" ? (
+          <div className="content-stack" data-testid="billing-create-draft-workspace">
+            {draftLoading ? <div className="loading-state inline-loading"><Loader2 className="spin" size={20} /><span>Opening draft</span></div> : null}
+            <BillingCreateQuoteView
+              annualYears={annualInvoiceYears}
+              clients={billingClients}
+              editorSession={editorSession}
+              loading={billingClientsLoading || draftLoading}
+              onArchive={handleDraftArchived}
+              onSaveControllerChange={registerDraftSaveController}
+              onPreviewChange={mergeCurrentDraft}
+              onPreviewCreated={handlePreviewCreated}
+              preview={currentDraft}
+              xeroTaxRates={xeroTaxRates}
+            />
+          </div>
+        ) : isReportingTab && loading && !report ? (
           <div className="loading-state">
             <Loader2 className="spin" size={28} />
             <span>Loading stored Teamwork reporting data</span>
@@ -4409,19 +4998,14 @@ function Shell({ onLogout, onUserUpdated, user }) {
             {activeTab === "reporting-overview" ? <Overview report={report} /> : null}
             {activeTab === "reporting-people" ? <PeopleView rows={report?.byUser || []} /> : null}
             {activeTab === "reporting-projects" ? <ProjectsView rows={report?.byClient || []} /> : null}
-            {activeTab === "billing-create-quote" ? (
-              <BillingCreateQuoteView
-                clients={billingClients}
-                annualYears={annualInvoiceYears}
-                loading={billingClientsLoading}
-                onPreviewCreated={handlePreviewCreated}
-                xeroTaxRates={xeroTaxRates}
-              />
-            ) : null}
             {activeTab === "billing-quotes" ? (
               <BillingQuotesView
+                archivedDrafts={archivedDrafts}
+                drafts={drafts}
                 loading={billingQuotesLoading}
+                onOpenDraft={openDraft}
                 onRefresh={loadBillingQuotes}
+                onRestoreDraft={restoreDraft}
                 quotes={filteredBillingQuotes}
               />
             ) : null}
@@ -4461,9 +5045,10 @@ export function App() {
     setSession(nextSession);
   }
 
-  async function handleLogout() {
+  async function handleLogout(editorSession = "") {
     if (demoMode) return;
-    await logout();
+    await logout(editorSession);
+    persistActiveTab("billing-quotes");
     setSession({ authenticated: false });
   }
 

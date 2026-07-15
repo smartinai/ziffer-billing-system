@@ -9,7 +9,19 @@ import { listBillingClients, updateBillingClient } from "./billingClientReposito
 import { getBillingQuoteDetail, listBillingQuotes, startXeroStatusPoller, syncXeroDocumentStatuses } from "./billingQuoteRepository.js";
 import { config } from "./config.js";
 import { checkDatabase } from "./db.js";
-import { createQuotePreview, sendQuotePreviewToXero, updateQuotePreviewMetadata, updateQuotePreviewTimeEntryBillable } from "./quotePreviewRepository.js";
+import {
+  acquireQuoteDraftLock,
+  archiveQuoteDraft,
+  createQuotePreview,
+  getArchivedQuoteDraft,
+  listQuoteDrafts,
+  releaseQuoteDraftLocksForSession,
+  renewQuoteDraftLock,
+  restoreQuoteDraft,
+  sendQuotePreviewToXero,
+  updateQuotePreviewMetadata,
+  updateQuotePreviewTimeEntryBillable
+} from "./quotePreviewRepository.js";
 import { getReportingSummary, getSourceStatus, refreshStoredReportingSummary } from "./reportingService.js";
 import { securityHeaders } from "./securityHeaders.js";
 import {
@@ -44,7 +56,14 @@ app.get("/api/health/db", async (_req, res) => {
 app.get("/api/auth/session", sessionHandler);
 app.get("/api/auth/csrf", requireAuth, csrfTokenHandler);
 app.post("/api/auth/login", loginRateLimit, loginHandler);
-app.post("/api/auth/logout", requireAuth, requireCsrf, logoutHandler);
+app.post("/api/auth/logout", requireAuth, requireCsrf, async (req, res, next) => {
+  try {
+    await releaseQuoteDraftLocksForSession(req.user.userId, req.body?.editorSessionId);
+    await logoutHandler(req, res);
+  } catch (error) {
+    next(error);
+  }
+});
 app.patch("/api/auth/account", requireAuth, requireCsrf, updateAccountHandler);
 
 function parseDateRange(req, res) {
@@ -225,9 +244,41 @@ app.post("/api/billing/quotes/:id/sync-xero-status", requireAuth, requireCsrf, a
   }
 });
 
+app.get("/api/billing/quote-previews", requireAuth, async (req, res, next) => {
+  try {
+    res.json(await listQuoteDrafts({ editorSessionId: req.query.editorSessionId }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/billing/quote-previews/:id", requireAuth, async (req, res, next) => {
+  try {
+    res.json(await getArchivedQuoteDraft(req.params.id));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/billing/quote-previews/:id/editor-lock", requireAuth, requireCsrf, async (req, res, next) => {
+  try {
+    res.json(await acquireQuoteDraftLock(req.params.id, req.body || {}, req.user));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/billing/quote-previews/:id/editor-lock", requireAuth, requireCsrf, async (req, res, next) => {
+  try {
+    res.json(await renewQuoteDraftLock(req.params.id, req.body || {}, req.user));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/billing/quote-previews", requireAuth, requireCsrf, async (req, res, next) => {
   try {
-    const payload = await createQuotePreview(req.body);
+    const payload = await createQuotePreview(req.body, req.user);
     await recordAuditEvent({
       action: "document_preview_create",
       actor: req.user,
@@ -249,7 +300,7 @@ app.post("/api/billing/quote-previews", requireAuth, requireCsrf, async (req, re
 
 app.patch("/api/billing/quote-previews/:id", requireAuth, requireCsrf, async (req, res, next) => {
   try {
-    const payload = await updateQuotePreviewMetadata(req.params.id, req.body);
+    const payload = await updateQuotePreviewMetadata(req.params.id, req.body, req.user);
     const lineUpdates = Array.isArray(req.body?.lines) ? req.body.lines : [];
     await recordAuditEvent({
       action: lineUpdates.length ? "document_rows_update" : "document_metadata_update",
@@ -274,9 +325,11 @@ app.patch("/api/billing/quote-previews/:id", requireAuth, requireCsrf, async (re
 app.patch("/api/billing/quote-previews/:id/time-entries/:entryId", requireAuth, requireCsrf, async (req, res, next) => {
   try {
     const payload = await updateQuotePreviewTimeEntryBillable(req.params.id, {
+      editorSessionId: req.body?.editorSessionId,
       entryId: req.params.entryId,
-      isBillable: req.body?.isBillable
-    });
+      isBillable: req.body?.isBillable,
+      version: req.body?.version
+    }, req.user);
     await recordAuditEvent({
       action: "time_entry_billable_update",
       actor: req.user,
@@ -296,7 +349,7 @@ app.patch("/api/billing/quote-previews/:id/time-entries/:entryId", requireAuth, 
 
 app.post("/api/billing/quote-previews/:id/send-to-xero", requireAuth, requireCsrf, async (req, res, next) => {
   try {
-    const payload = await sendQuotePreviewToXero(req.params.id, req.body || {});
+    const payload = await sendQuotePreviewToXero(req.params.id, req.body || {}, req.user);
     await recordAuditEvent({
       action: "send_to_xero",
       actor: req.user,
@@ -312,6 +365,65 @@ app.post("/api/billing/quote-previews/:id/send-to-xero", requireAuth, requireCsr
         sentAmount: payload.preview?.amount,
         summary: `Sent ${payload.xero?.documentLabel || "document"} ${payload.preview?.quoteNumber || ""} to Xero for ${payload.preview?.billingClient?.displayName || "client"} (${payload.preview?.amount ?? 0} EUR)`.trim()
       }
+    });
+    res.json(payload);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/billing/quote-previews/:id/time-entries", requireAuth, requireCsrf, async (req, res, next) => {
+  try {
+    const entryIds = Array.isArray(req.body?.entryIds) ? req.body.entryIds : [];
+    const payload = await updateQuotePreviewTimeEntryBillable(req.params.id, {
+      editorSessionId: req.body?.editorSessionId,
+      entryIds,
+      isBillable: req.body?.isBillable,
+      version: req.body?.version
+    }, req.user);
+    await recordAuditEvent({
+      action: "time_entry_billable_update",
+      actor: req.user,
+      entityId: req.params.id,
+      entityType: "quote_preview",
+      metadata: {
+        entryCount: entryIds.length,
+        isBillable: req.body?.isBillable,
+        quotePreviewId: req.params.id,
+        summary: `Marked ${entryIds.length} task time ${entryIds.length === 1 ? "entry" : "entries"} ${req.body?.isBillable ? "billable" : "unbillable"}`
+      }
+    });
+    res.json(payload);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/billing/quote-previews/:id/archive", requireAuth, requireCsrf, async (req, res, next) => {
+  try {
+    const payload = await archiveQuoteDraft(req.params.id, req.body || {}, req.user);
+    await recordAuditEvent({
+      action: "document_draft_archive",
+      actor: req.user,
+      entityId: req.params.id,
+      entityType: "quote_preview",
+      metadata: { summary: `Archived document draft ${req.params.id}` }
+    });
+    res.json(payload);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/billing/quote-previews/:id/restore", requireAuth, requireCsrf, async (req, res, next) => {
+  try {
+    const payload = await restoreQuoteDraft(req.params.id, req.body || {}, req.user);
+    await recordAuditEvent({
+      action: "document_draft_restore",
+      actor: req.user,
+      entityId: req.params.id,
+      entityType: "quote_preview",
+      metadata: { summary: `Restored document draft ${payload.preview?.quoteNumber || req.params.id}` }
     });
     res.json(payload);
   } catch (error) {
@@ -423,6 +535,8 @@ app.get("*", (req, res, next) => {
 app.use((error, _req, res, _next) => {
   console.error(error.message);
   res.status(error.statusCode || 500).json({
+    code: error.code || undefined,
+    details: error.details || undefined,
     message: error.message || "Unexpected server error."
   });
 });

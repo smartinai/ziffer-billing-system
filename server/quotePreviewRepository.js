@@ -4,6 +4,96 @@ import { fetchTask } from "./teamworkClient.js";
 import { sendQuoteRequestToXero } from "./xeroClient.js";
 
 const validDate = /^\d{4}-\d{2}-\d{2}$/;
+const validUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const documentNumberUniqueIndex = "idx_quote_previews_document_number_unique";
+
+function draftLockKey(id) {
+  return `quote-draft:${id}`;
+}
+
+async function acquireTransactionLock(database, key) {
+  await database.query("select pg_advisory_xact_lock(hashtextextended($1::text, 0))", [key]);
+}
+
+async function acquireDraftTransactionLock(database, id) {
+  await acquireTransactionLock(database, draftLockKey(id));
+}
+
+async function acquireDraftSessionLock(database, id) {
+  await database.query("select pg_advisory_lock(hashtextextended($1::text, 0))", [draftLockKey(id)]);
+}
+
+async function releaseDraftSessionLock(database, id) {
+  await database.query("select pg_advisory_unlock(hashtextextended($1::text, 0))", [draftLockKey(id)]);
+}
+
+function mapDocumentNumberConflict(error) {
+  if (error?.code !== "23505" || error?.constraint !== documentNumberUniqueIndex) return error;
+  return draftError(
+    "That document number is already used by another draft. Choose a different number and try again.",
+    409,
+    "DRAFT_DOCUMENT_NUMBER_CONFLICT"
+  );
+}
+function actorUserId(actor) {
+  return compactText(actor?.userId || actor?.id);
+}
+
+function assertEditorSession(editorSessionId) {
+  const value = compactText(editorSessionId);
+  if (!validUuid.test(value)) {
+    const error = new Error("A valid editor session is required.");
+    error.statusCode = 400;
+    error.code = "INVALID_EDITOR_SESSION";
+    throw error;
+  }
+  return value;
+}
+
+function draftError(message, statusCode, code, details = {}) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  error.code = code;
+  error.details = details;
+  return error;
+}
+
+function activeLock(row) {
+  return Boolean(row.editingBy && row.editingSessionId && row.editingExpiresAt && new Date(row.editingExpiresAt).getTime() > Date.now());
+}
+
+function assertDraftMutation(row, input, actor) {
+  const userId = actorUserId(actor);
+  const editorSessionId = assertEditorSession(input.editorSessionId);
+  const expectedVersion = Number(input.version);
+
+  if (!userId) throw draftError("Authentication required.", 401, "AUTH_REQUIRED");
+  if (row.archivedAt) throw draftError("Restore this archived draft before editing it.", 409, "DRAFT_ARCHIVED");
+  if (!Number.isInteger(expectedVersion) || expectedVersion < 1) {
+    throw draftError("A valid draft version is required.", 400, "INVALID_DRAFT_VERSION");
+  }
+  if (Number(row.version) !== expectedVersion) {
+    throw draftError("This draft changed since it was opened. Reload the latest version.", 409, "DRAFT_VERSION_CONFLICT", {
+      currentVersion: Number(row.version)
+    });
+  }
+  if (!activeLock(row) || row.editingBy !== userId || row.editingSessionId !== editorSessionId) {
+    const lockedByAnotherUser = activeLock(row) && row.editingBy !== userId;
+    throw draftError(
+      lockedByAnotherUser
+        ? `This draft is currently being edited by ${row.editingByName || "another user"}.`
+        : "Your editing session expired. Reopen the draft to continue.",
+      423,
+      "DRAFT_LOCKED",
+      {
+        editorName: lockedByAnotherUser ? row.editingByName || "Another user" : "",
+        expiresAt: row.editingExpiresAt || null
+      }
+    );
+  }
+
+  return { editorSessionId, expectedVersion, userId };
+}
 
 function compactText(value) {
   return String(value || "").trim().replace(/\s+/g, " ");
@@ -173,6 +263,43 @@ function sourceTimeEntryIds(value) {
   if (!Array.isArray(value)) return [];
   return value.map((entryId) => compactText(entryId)).filter(Boolean);
 }
+
+function requestedTimeEntryIds(input = {}) {
+  const values = Array.isArray(input.entryIds) ? input.entryIds : [input.entryId];
+  return [...new Set(values.map((entryId) => compactText(entryId)).filter(Boolean))];
+}
+
+function quoteLineSourceSnapshot(line = {}) {
+  return {
+    annualBilling: Array.isArray(line.annualBilling) ? line.annualBilling : [],
+    annualCoverage: Array.isArray(line.annualCoverage) ? line.annualCoverage : [],
+    entries: Array.isArray(line.entries) ? line.entries : [],
+    serviceKey: line.serviceKey || "",
+    serviceLabel: line.serviceLabel || ""
+  };
+}
+
+function savedQuoteLine(row = {}) {
+  const snapshot = row.sourceSnapshot && typeof row.sourceSnapshot === "object" ? row.sourceSnapshot : {};
+  return {
+    ...row,
+    annualBilling: Array.isArray(snapshot.annualBilling) ? snapshot.annualBilling : [],
+    annualCoverage: Array.isArray(snapshot.annualCoverage) ? snapshot.annualCoverage : [],
+    entries: Array.isArray(snapshot.entries) ? snapshot.entries : [],
+    serviceKey: snapshot.serviceKey || row.serviceKey || "",
+    serviceLabel: snapshot.serviceLabel || row.serviceLabel || ""
+  };
+}
+
+export const quoteDraftTestHooks = {
+  activeLock,
+  assertDraftMutation,
+  draftLockKey,
+  mapDocumentNumberConflict,
+  quoteLineSourceSnapshot,
+  requestedTimeEntryIds,
+  savedQuoteLine
+};
 
 async function loadQuoteServiceOverrides(database, previewId) {
   const result = await database.query(
@@ -401,9 +528,10 @@ async function insertQuoteLines(database, previewId, lines) {
           annual_covered,
           include_in_xero,
           comments,
-          warnings
+          warnings,
+          source_snapshot
         )
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
         returning id
       `,
       [
@@ -425,7 +553,8 @@ async function insertQuoteLines(database, previewId, lines) {
         line.annualCovered,
         line.includeInXero,
         line.comments,
-        JSON.stringify(line.warnings)
+        JSON.stringify(line.warnings),
+        JSON.stringify(quoteLineSourceSnapshot(line))
       ]
     );
     savedLines.push({ ...line, id: lineResult.rows[0].id });
@@ -506,6 +635,7 @@ function previewResponse({ billingClient, insertRow, lines, preview, quoteDate, 
       billingClient,
       createdAt: insertRow.created_at,
       currency: preview.currency,
+      documentType: insertRow.document_type || preview.documentType || "draft_invoice",
       expiryDate,
       id: insertRow.id,
       lines,
@@ -516,6 +646,8 @@ function previewResponse({ billingClient, insertRow, lines, preview, quoteDate, 
       services,
       status: "preview",
       totals: preview.totals,
+      updatedAt: insertRow.updated_at || insertRow.created_at,
+      version: Number(insertRow.version || preview.version || 1),
       warnings: preview.warnings
     }
   };
@@ -676,6 +808,513 @@ function xeroLogMessage(documentLabel, sendMode) {
 function xeroUserMessage(documentLabel, sendMode) {
   if (sendMode === "live") return `Annual hours approved and ${documentLabel} created in Xero.`;
   return `Annual hours approved. Xero payload prepared; connect Xero to send live ${documentLabel}s.`;
+}
+
+function draftLineSnapshotKey(line = {}) {
+  return [
+    line.sourceType || "teamwork",
+    compactText(line.taskName || line.description).toLowerCase(),
+    Boolean(line.annualCovered) ? "annual" : "standard",
+    sourceTimeEntryIds(line.sourceTimeEntryIds).sort().join(",")
+  ].join("::");
+}
+
+async function loadDraftPreview(database, id, { persistLegacySnapshots = false } = {}) {
+  const previewResult = await database.query(
+    `
+      select
+        preview.id,
+        preview.created_at as "createdAt",
+        preview.updated_at as "updatedAt",
+        preview.period_start::text as "periodStart",
+        preview.period_end::text as "periodEnd",
+        preview.reference,
+        preview.quote_number as "quoteNumber",
+        preview.quote_date::text as "quoteDate",
+        preview.expiry_date::text as "expiryDate",
+        preview.status,
+        preview.warnings,
+        preview.totals,
+        preview.document_type as "documentType",
+        preview.version::int as version,
+        preview.archived_at as "archivedAt",
+        preview.editing_by as "editingBy",
+        preview.editing_session_id::text as "editingSessionId",
+        preview.editing_expires_at as "editingExpiresAt",
+        editor.display_name as "editingByName",
+        client.id as "billingClientId",
+        client.abbreviation,
+        client.account_code as "accountCode",
+        client.currency,
+        client.discount::float8 as discount,
+        client.display_name as "displayName",
+        client.status as "clientStatus",
+        client.tax_rate_name as "taxRateName",
+        client.tax_type as "taxType",
+        client.teamwork_project_id as "teamworkProjectId",
+        client.xero_client_name as "xeroClientName",
+        client.xero_contact_id as "xeroContactId",
+        project.name as "teamworkProjectName",
+        project.company_name as "teamworkCompanyName"
+      from quote_previews preview
+      join billing_clients client on client.id = preview.billing_client_id
+      left join teamwork_projects project on project.id = client.teamwork_project_id
+      left join app_users editor on editor.id = preview.editing_by
+      where preview.id = $1
+    `,
+    [id]
+  );
+  if (!previewResult.rowCount) throw draftError("Draft not found.", 404, "DRAFT_NOT_FOUND");
+
+  const row = previewResult.rows[0];
+  const billingClient = mapBillingClient({ ...row, id: row.billingClientId, status: row.clientStatus });
+  const servicesResult = await database.query(
+    `
+      select
+        id,
+        service_key as "serviceKey",
+        label,
+        aliases,
+        annual_invoice_eligible as "annualInvoiceEligible",
+        sort_order as "sortOrder"
+      from standard_services
+      where active = true
+      order by sort_order, lower(label)
+    `
+  );
+  const services = servicesResult.rows.map(mapService);
+  const linesResult = await database.query(
+    `
+      select
+        line.id,
+        line.line_order as "lineOrder",
+        line.service_id as "serviceId",
+        service.service_key as "serviceKey",
+        service.label as "serviceLabel",
+        line.source_type as "sourceType",
+        line.source_time_entry_ids as "sourceTimeEntryIds",
+        line.annual_year as "annualYear",
+        line.task_name as "taskName",
+        line.description,
+        line.quantity_hours::float8 as "quantityHours",
+        line.unit_amount::float8 as "unitAmount",
+        line.discount::float8 as discount,
+        line.amount::float8 as amount,
+        line.account_code as "accountCode",
+        line.tax_type as "taxType",
+        line.is_billable as "isBillable",
+        line.annual_covered as "annualCovered",
+        line.include_in_xero as "includeInXero",
+        line.comments,
+        line.warnings,
+        line.source_snapshot as "sourceSnapshot"
+      from quote_lines line
+      left join standard_services service on service.id = line.service_id
+      where line.quote_preview_id = $1
+      order by line.line_order, line.id
+    `,
+    [id]
+  );
+  let lines = linesResult.rows.map(savedQuoteLine);
+  const legacyLines = lines.filter((line) => !line.sourceSnapshot || !Object.keys(line.sourceSnapshot).length);
+
+  if (legacyLines.length) {
+    const sourceEntries = await loadPreviewSourceEntries(database, billingClient, row.periodStart, row.periodEnd);
+    const billableOverrides = await loadQuoteBillableOverrides(database, id);
+    let entries = sourceEntries.map(mapEntry).map((entry) =>
+      billableOverrides.has(String(entry.id)) ? { ...entry, isBillable: billableOverrides.get(String(entry.id)) } : entry
+    );
+    entries = await backfillMissingTaskNames(database, entries);
+    const serviceOverrides = await loadQuoteServiceOverrides(database, id);
+    const annualUsage = await loadAnnualUsage(
+      database,
+      billingClient.id,
+      row.periodStart,
+      row.periodEnd,
+      entries,
+      serviceOverrides.map((override) => override.annualYear).filter(Boolean)
+    );
+    const rebuilt = applyExistingLineSettings(
+      buildAggregatedQuotePreview({
+        annualUsage,
+        billingClient,
+        entries,
+        periodEnd: row.periodEnd,
+        periodStart: row.periodStart,
+        serviceOverrides,
+        services
+      }),
+      lines,
+      services
+    );
+    const rebuiltByKey = new Map();
+    for (const line of rebuilt.lines) {
+      const key = draftLineSnapshotKey(line);
+      const bucket = rebuiltByKey.get(key) || [];
+      bucket.push(line);
+      rebuiltByKey.set(key, bucket);
+    }
+
+    lines = lines.map((line) => {
+      if (line.sourceSnapshot && Object.keys(line.sourceSnapshot).length) return line;
+      const match = rebuiltByKey.get(draftLineSnapshotKey(line))?.shift();
+      return match ? savedQuoteLine({ ...line, sourceSnapshot: quoteLineSourceSnapshot(match) }) : line;
+    });
+
+    if (persistLegacySnapshots) {
+      for (const line of lines.filter((item) => legacyLines.some((legacy) => legacy.id === item.id))) {
+        await database.query(
+          "update quote_lines set source_snapshot = $2 where id = $1",
+          [line.id, JSON.stringify(quoteLineSourceSnapshot(line))]
+        );
+      }
+    }
+  }
+
+  return {
+    lifecycle: row,
+    preview: {
+      billingClient,
+      createdAt: row.createdAt,
+      currency: billingClient.currency,
+      documentType: row.documentType || "draft_invoice",
+      expiryDate: row.expiryDate,
+      id: row.id,
+      lines,
+      period: { endDate: row.periodEnd, startDate: row.periodStart },
+      quoteDate: row.quoteDate,
+      quoteNumber: row.quoteNumber,
+      reference: row.reference,
+      services,
+      status: row.status,
+      totals: row.totals || {},
+      updatedAt: row.updatedAt,
+      version: Number(row.version || 1),
+      warnings: row.warnings || []
+    }
+  };
+}
+
+function draftSummary(row, editorSessionId = "") {
+  const lockIsActive = activeLock(row);
+  return {
+    archivedAt: row.archivedAt || null,
+    clientName: row.clientName || "Unknown client",
+    createdAt: row.createdAt,
+    createdBy: row.createdByName || "Unknown user",
+    documentType: row.documentType || "draft_invoice",
+    expiryDate: row.expiryDate,
+    id: row.id,
+    lastEditedBy: row.lastEditedByName || row.createdByName || "Unknown user",
+    lock: lockIsActive
+      ? {
+          editorName: row.editingByName || "Another user",
+          expiresAt: row.editingExpiresAt,
+          ownedBySession: Boolean(editorSessionId && row.editingSessionId === editorSessionId)
+        }
+      : null,
+    period: { endDate: row.periodEnd, startDate: row.periodStart },
+    quoteDate: row.quoteDate,
+    quoteNumber: row.quoteNumber,
+    reference: row.reference,
+    totals: row.totals || {},
+    updatedAt: row.updatedAt,
+    version: Number(row.version || 1)
+  };
+}
+
+export async function listQuoteDrafts(input = {}) {
+  const pool = getDatabasePool();
+  if (!pool) throw draftError("DATABASE_URL is not configured.", 503, "DATABASE_NOT_CONFIGURED");
+  const result = await pool.query(
+    `
+      select
+        preview.id,
+        preview.created_at as "createdAt",
+        preview.updated_at as "updatedAt",
+        preview.archived_at as "archivedAt",
+        preview.period_start::text as "periodStart",
+        preview.period_end::text as "periodEnd",
+        preview.reference,
+        preview.quote_number as "quoteNumber",
+        preview.quote_date::text as "quoteDate",
+        preview.expiry_date::text as "expiryDate",
+        preview.document_type as "documentType",
+        preview.version::int as version,
+        preview.totals,
+        client.display_name as "clientName",
+        creator.display_name as "createdByName",
+        last_editor.display_name as "lastEditedByName",
+        preview.editing_by as "editingBy",
+        preview.editing_session_id::text as "editingSessionId",
+        preview.editing_expires_at as "editingExpiresAt",
+        lock_editor.display_name as "editingByName"
+      from quote_previews preview
+      left join billing_clients client on client.id = preview.billing_client_id
+      left join app_users creator on creator.id = preview.created_by
+      left join app_users last_editor on last_editor.id = preview.last_edited_by
+      left join app_users lock_editor on lock_editor.id = preview.editing_by
+      where preview.status = 'preview'
+      order by preview.archived_at nulls first, preview.updated_at desc, preview.id
+    `
+  );
+  const editorSessionId = validUuid.test(compactText(input.editorSessionId))
+    ? compactText(input.editorSessionId)
+    : "";
+  const summaries = result.rows.map((row) => draftSummary(row, editorSessionId));
+  return {
+    archived: summaries.filter((draft) => draft.archivedAt),
+    drafts: summaries.filter((draft) => !draft.archivedAt)
+  };
+}
+
+export async function acquireQuoteDraftLock(id, input = {}, actor = {}) {
+  const pool = getDatabasePool();
+  if (!pool) throw draftError("DATABASE_URL is not configured.", 503, "DATABASE_NOT_CONFIGURED");
+  const userId = actorUserId(actor);
+  const editorSessionId = assertEditorSession(input.editorSessionId);
+  if (!userId) throw draftError("Authentication required.", 401, "AUTH_REQUIRED");
+  const database = await pool.connect();
+  try {
+    await database.query("begin");
+    await acquireDraftTransactionLock(database, id);
+    const currentResult = await database.query(
+      `
+        select
+          preview.status,
+          preview.archived_at as "archivedAt",
+          preview.editing_by as "editingBy",
+          preview.editing_session_id::text as "editingSessionId",
+          preview.editing_expires_at as "editingExpiresAt",
+          editor.display_name as "editingByName"
+        from quote_previews preview
+        left join app_users editor on editor.id = preview.editing_by
+        where preview.id = $1
+        for update of preview
+      `,
+      [id]
+    );
+    if (!currentResult.rowCount) throw draftError("Draft not found.", 404, "DRAFT_NOT_FOUND");
+    const current = currentResult.rows[0];
+    if (current.status !== "preview") throw draftError("This document has already been sent.", 409, "DRAFT_NOT_EDITABLE");
+    if (current.archivedAt) throw draftError("Restore this archived draft before editing it.", 409, "DRAFT_ARCHIVED");
+    if (activeLock(current) && (current.editingBy !== userId || current.editingSessionId !== editorSessionId)) {
+      throw draftError(`This draft is currently being edited by ${current.editingByName || "another user"}.`, 423, "DRAFT_LOCKED", {
+        editorName: current.editingByName || "Another user",
+        expiresAt: current.editingExpiresAt
+      });
+    }
+    await database.query(
+      `
+        update quote_previews
+        set editing_by = $2,
+            editing_session_id = $3,
+            editing_expires_at = now() + interval '10 minutes'
+        where id = $1
+      `,
+      [id, userId, editorSessionId]
+    );
+    const payload = await loadDraftPreview(database, id, { persistLegacySnapshots: true });
+    await database.query("commit");
+    return { preview: payload.preview };
+  } catch (error) {
+    await database.query("rollback");
+    throw error;
+  } finally {
+    database.release();
+  }
+}
+
+export async function renewQuoteDraftLock(id, input = {}, actor = {}) {
+  const pool = getDatabasePool();
+  if (!pool) throw draftError("DATABASE_URL is not configured.", 503, "DATABASE_NOT_CONFIGURED");
+  const userId = actorUserId(actor);
+  const editorSessionId = assertEditorSession(input.editorSessionId);
+  const result = await pool.query(
+    `
+      update quote_previews
+      set editing_expires_at = now() + interval '10 minutes'
+      where id = $1
+        and status = 'preview'
+        and archived_at is null
+        and editing_by = $2
+        and editing_session_id = $3
+        and editing_expires_at > now()
+      returning editing_expires_at as "expiresAt"
+    `,
+    [id, userId, editorSessionId]
+  );
+  if (!result.rowCount) throw draftError("Your editing session expired. Reopen the draft to continue.", 423, "DRAFT_LOCKED");
+  return { lock: { expiresAt: result.rows[0].expiresAt } };
+}
+
+export async function getArchivedQuoteDraft(id) {
+  const pool = getDatabasePool();
+  if (!pool) throw draftError("DATABASE_URL is not configured.", 503, "DATABASE_NOT_CONFIGURED");
+  const payload = await loadDraftPreview(pool, id);
+  if (!payload.lifecycle.archivedAt || payload.lifecycle.status !== "preview") {
+    throw draftError("Archived draft not found.", 404, "DRAFT_NOT_FOUND");
+  }
+  return { preview: payload.preview };
+}
+
+export async function archiveQuoteDraft(id, input = {}, actor = {}) {
+  const pool = getDatabasePool();
+  if (!pool) throw draftError("DATABASE_URL is not configured.", 503, "DATABASE_NOT_CONFIGURED");
+  const database = await pool.connect();
+  try {
+    await database.query("begin");
+    await acquireDraftTransactionLock(database, id);
+    const result = await database.query(
+      `
+        select
+          preview.status,
+          preview.version::int as version,
+          preview.archived_at as "archivedAt",
+          preview.editing_by as "editingBy",
+          preview.editing_session_id::text as "editingSessionId",
+          preview.editing_expires_at as "editingExpiresAt",
+          editor.display_name as "editingByName"
+        from quote_previews preview
+        left join app_users editor on editor.id = preview.editing_by
+        where preview.id = $1
+        for update of preview
+      `,
+      [id]
+    );
+    if (!result.rowCount) throw draftError("Draft not found.", 404, "DRAFT_NOT_FOUND");
+    const current = result.rows[0];
+    if (current.status !== "preview") throw draftError("This document has already been sent.", 409, "DRAFT_NOT_EDITABLE");
+    const access = assertDraftMutation(current, input, actor);
+    const updated = await database.query(
+      `
+        update quote_previews
+        set archived_at = now(),
+            archived_by = $2,
+            last_edited_by = $2,
+            editing_by = null,
+            editing_session_id = null,
+            editing_expires_at = null,
+            version = version + 1,
+            updated_at = now()
+        where id = $1
+        returning archived_at as "archivedAt", version::int as version, updated_at as "updatedAt"
+      `,
+      [id, access.userId]
+    );
+    await database.query(
+      "insert into quote_events (quote_preview_id, user_id, action, metadata) values ($1, $2, 'draft_archived', '{}'::jsonb)",
+      [id, access.userId]
+    );
+    await database.query("commit");
+    return { draft: { id, ...updated.rows[0] } };
+  } catch (error) {
+    await database.query("rollback");
+    throw error;
+  } finally {
+    database.release();
+  }
+}
+
+export async function restoreQuoteDraft(id, input = {}, actor = {}) {
+  const pool = getDatabasePool();
+  if (!pool) throw draftError("DATABASE_URL is not configured.", 503, "DATABASE_NOT_CONFIGURED");
+  const userId = actorUserId(actor);
+  const editorSessionId = assertEditorSession(input.editorSessionId);
+  const expectedVersion = Number(input.version);
+  if (!userId) throw draftError("Authentication required.", 401, "AUTH_REQUIRED");
+  const database = await pool.connect();
+  try {
+    await database.query("begin");
+    await acquireDraftTransactionLock(database, id);
+    const result = await database.query(
+      `
+        select status, version::int as version, archived_at as "archivedAt"
+        from quote_previews
+        where id = $1
+        for update
+      `,
+      [id]
+    );
+    if (!result.rowCount || result.rows[0].status !== "preview" || !result.rows[0].archivedAt) {
+      throw draftError("Archived draft not found.", 404, "DRAFT_NOT_FOUND");
+    }
+    if (!Number.isInteger(expectedVersion) || expectedVersion !== Number(result.rows[0].version)) {
+      throw draftError("This archived draft changed. Refresh the list and try again.", 409, "DRAFT_VERSION_CONFLICT", {
+        currentVersion: Number(result.rows[0].version)
+      });
+    }
+    await database.query(
+      `
+        update quote_previews
+        set archived_at = null,
+            archived_by = null,
+            last_edited_by = $2,
+            editing_by = $2,
+            editing_session_id = $3,
+            editing_expires_at = now() + interval '10 minutes',
+            version = version + 1,
+            updated_at = now()
+        where id = $1
+      `,
+      [id, userId, editorSessionId]
+    );
+    await database.query(
+      "insert into quote_events (quote_preview_id, user_id, action, metadata) values ($1, $2, 'draft_restored', '{}'::jsonb)",
+      [id, userId]
+    );
+    const payload = await loadDraftPreview(database, id, { persistLegacySnapshots: true });
+    await database.query("commit");
+    return { preview: payload.preview };
+  } catch (error) {
+    await database.query("rollback");
+    throw error;
+  } finally {
+    database.release();
+  }
+}
+
+export async function releaseQuoteDraftLocksForSession(userId, editorSessionId) {
+  const pool = getDatabasePool();
+  const sessionId = compactText(editorSessionId);
+  if (!pool || !userId || !validUuid.test(sessionId)) return;
+  const database = await pool.connect();
+  let transactionOpen = false;
+  try {
+    const draftsResult = await database.query(
+      `
+        select id
+        from quote_previews
+        where editing_by = $1
+          and editing_session_id = $2
+        order by id
+      `,
+      [userId, sessionId]
+    );
+    await database.query("begin");
+    transactionOpen = true;
+    for (const draft of draftsResult.rows) {
+      await acquireDraftTransactionLock(database, draft.id);
+    }
+    await database.query(
+      `
+        update quote_previews
+        set editing_by = null,
+            editing_session_id = null,
+            editing_expires_at = null
+        where editing_by = $1
+          and editing_session_id = $2
+      `,
+      [userId, sessionId]
+    );
+    await database.query("commit");
+    transactionOpen = false;
+  } catch (error) {
+    if (transactionOpen) await database.query("rollback");
+    throw error;
+  } finally {
+    database.release();
+  }
 }
 
 function xeroIdempotencyKey(id, documentType) {
@@ -883,8 +1522,12 @@ async function applyAnnualUsageDeltas(database, { billingClientId, deltas, previ
   return applied;
 }
 
-export async function createQuotePreview({ billingClientId, endDate, startDate }) {
+export async function createQuotePreview({ billingClientId, documentType, editorSessionId, endDate, startDate }, actor = {}) {
   assertDateRange(startDate, endDate);
+  const userId = actorUserId(actor);
+  const nextEditorSessionId = assertEditorSession(editorSessionId);
+  const nextDocumentType = xeroDocumentType(documentType);
+  if (!userId) throw draftError("Authentication required.", 401, "AUTH_REQUIRED");
   if (!billingClientId) {
     const error = new Error("Billing client is required.");
     error.statusCode = 400;
@@ -944,6 +1587,7 @@ export async function createQuotePreview({ billingClientId, endDate, startDate }
       error.statusCode = 400;
       throw error;
     }
+    await acquireTransactionLock(database, `quote-draft-number:${billingClient.id}`);
 
     const servicesResult = await database.query(
       `
@@ -1025,10 +1669,16 @@ export async function createQuotePreview({ billingClientId, endDate, startDate }
           expiry_date,
           status,
           warnings,
-          totals
+          totals,
+          document_type,
+          created_by,
+          last_edited_by,
+          editing_by,
+          editing_session_id,
+          editing_expires_at
         )
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'preview', $10, $11)
-        returning id, created_at
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'preview', $10, $11, $12, $13, $13, $13, $14, now() + interval '10 minutes')
+        returning id, created_at, updated_at, version, document_type, editing_expires_at
       `,
       [
         billingClient.id,
@@ -1041,7 +1691,10 @@ export async function createQuotePreview({ billingClientId, endDate, startDate }
         quoteDate,
         expiryDate,
         JSON.stringify(preview.warnings),
-        JSON.stringify(preview.totals)
+        JSON.stringify(preview.totals),
+        nextDocumentType,
+        userId,
+        nextEditorSessionId
       ]
     );
     const previewId = insertResult.rows[0].id;
@@ -1062,13 +1715,13 @@ export async function createQuotePreview({ billingClientId, endDate, startDate }
     });
   } catch (error) {
     await database.query("rollback");
-    throw error;
+    throw mapDocumentNumberConflict(error);
   } finally {
     database.release();
   }
 }
 
-export async function updateQuotePreviewMetadata(id, input = {}) {
+export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
   const pool = getDatabasePool();
   if (!pool) {
     const error = new Error("DATABASE_URL is not configured.");
@@ -1080,6 +1733,7 @@ export async function updateQuotePreviewMetadata(id, input = {}) {
 
   try {
     await database.query("begin");
+    await acquireDraftTransactionLock(database, id);
 
     const currentResult = await database.query(
       `
@@ -1094,6 +1748,13 @@ export async function updateQuotePreviewMetadata(id, input = {}) {
           preview.expiry_date::text as expiry_date,
           preview.status,
           preview.totals,
+          preview.document_type as "documentType",
+          preview.version::int as version,
+          preview.archived_at as "archivedAt",
+          preview.editing_by as "editingBy",
+          preview.editing_session_id::text as "editingSessionId",
+          preview.editing_expires_at as "editingExpiresAt",
+          editor.display_name as "editingByName",
           client.id as "billingClientId",
           client.abbreviation,
           client.account_code as "accountCode",
@@ -1111,6 +1772,7 @@ export async function updateQuotePreviewMetadata(id, input = {}) {
         from quote_previews preview
         join billing_clients client on client.id = preview.billing_client_id
         left join teamwork_projects project on project.id = client.teamwork_project_id
+        left join app_users editor on editor.id = preview.editing_by
         where preview.id = $1
         for update of preview
       `,
@@ -1129,6 +1791,7 @@ export async function updateQuotePreviewMetadata(id, input = {}) {
       error.statusCode = 409;
       throw error;
     }
+    const access = assertDraftMutation(currentPreview, input, actor);
 
     const nextReference = Object.hasOwn(input, "reference") ? String(input.reference || "").trim() : currentPreview.reference;
     const nextQuoteDate = Object.hasOwn(input, "quoteDate") ? input.quoteDate : currentPreview.quote_date;
@@ -1136,6 +1799,9 @@ export async function updateQuotePreviewMetadata(id, input = {}) {
     const nextQuoteNumber = Object.hasOwn(input, "quoteNumber")
       ? compactText(input.quoteNumber)
       : currentPreview.quote_number;
+    const nextDocumentType = Object.hasOwn(input, "documentType")
+      ? xeroDocumentType(input.documentType)
+      : xeroDocumentType(currentPreview.documentType);
 
     assertQuoteMetadata({ expiryDate: nextExpiryDate, quoteDate: nextQuoteDate });
     if (!nextQuoteNumber) {
@@ -1408,11 +2074,12 @@ export async function updateQuotePreviewMetadata(id, input = {}) {
     for (const serviceOverride of serviceOverrideEvents) {
       await database.query(
         `
-          insert into quote_events (quote_preview_id, action, metadata)
-          values ($1, 'quote_line_service_override', $2)
+          insert into quote_events (quote_preview_id, user_id, action, metadata)
+          values ($1, $2, 'quote_line_service_override', $3)
         `,
         [
           id,
+          access.userId,
           JSON.stringify({
             annualYear: serviceOverride.annualYear,
             lineId: serviceOverride.lineId,
@@ -1535,10 +2202,14 @@ export async function updateQuotePreviewMetadata(id, input = {}) {
             expiry_date = $5,
             warnings = $6,
             totals = $7,
+            document_type = $8,
+            last_edited_by = $9,
+            editing_expires_at = now() + interval '10 minutes',
+            version = version + 1,
             updated_at = now()
           where id = $1
         `,
-        [id, nextReference, nextQuoteNumber, nextQuoteDate, nextExpiryDate, JSON.stringify(preview.warnings), JSON.stringify(preview.totals)]
+        [id, nextReference, nextQuoteNumber, nextQuoteDate, nextExpiryDate, JSON.stringify(preview.warnings), JSON.stringify(preview.totals), nextDocumentType, access.userId]
       );
 
       await database.query("commit");
@@ -1548,7 +2219,10 @@ export async function updateQuotePreviewMetadata(id, input = {}) {
         expiryDate: nextExpiryDate,
         insertRow: {
           created_at: currentPreview.created_at,
-          id
+          document_type: nextDocumentType,
+          id,
+          updated_at: new Date(),
+          version: Number(currentPreview.version) + 1
         },
         lines: savedLines,
         preview,
@@ -1593,6 +2267,10 @@ export async function updateQuotePreviewMetadata(id, input = {}) {
           quote_date = $4,
           expiry_date = $5,
           totals = $6,
+          document_type = $7,
+          last_edited_by = $8,
+          editing_expires_at = now() + interval '10 minutes',
+          version = version + 1,
           updated_at = now()
         where id = $1
         returning
@@ -1601,10 +2279,12 @@ export async function updateQuotePreviewMetadata(id, input = {}) {
           quote_number as "quoteNumber",
           quote_date::text as "quoteDate",
           expiry_date::text as "expiryDate",
+          document_type as "documentType",
           totals,
+          version::int as version,
           updated_at as "updatedAt"
       `,
-      [id, nextReference, nextQuoteNumber, nextQuoteDate, nextExpiryDate, JSON.stringify(nextTotals)]
+      [id, nextReference, nextQuoteNumber, nextQuoteDate, nextExpiryDate, JSON.stringify(nextTotals), nextDocumentType, access.userId]
     );
 
     const linesResult = await database.query(
@@ -1628,7 +2308,9 @@ export async function updateQuotePreviewMetadata(id, input = {}) {
           line.is_billable as "isBillable",
           line.annual_covered as "annualCovered",
           line.include_in_xero as "includeInXero",
-          line.comments
+          line.comments,
+          line.warnings,
+          line.source_snapshot as "sourceSnapshot"
         from quote_lines line
         left join standard_services service on service.id = line.service_id
         where line.quote_preview_id = $1
@@ -1639,7 +2321,7 @@ export async function updateQuotePreviewMetadata(id, input = {}) {
     const insertedManualLineDetails = new Map(insertedManualLinesForResponse.map((line) => [line.id, line]));
     const responseLines = linesResult.rows.map((line) => {
       const details = insertedManualLineDetails.get(line.id);
-      return details ? { ...line, ...details } : line;
+      return details ? { ...savedQuoteLine(line), ...details } : savedQuoteLine(line);
     });
 
     await database.query("commit");
@@ -1653,16 +2335,16 @@ export async function updateQuotePreviewMetadata(id, input = {}) {
     };
   } catch (error) {
     await database.query("rollback");
-    throw error;
+    throw mapDocumentNumberConflict(error);
   } finally {
     database.release();
   }
 }
 
-export async function updateQuotePreviewTimeEntryBillable(id, input = {}) {
-  const entryId = compactText(input.entryId);
-  if (!entryId || typeof input.isBillable !== "boolean") {
-    const error = new Error("Choose a source time entry and billable state.");
+export async function updateQuotePreviewTimeEntryBillable(id, input = {}, actor = {}) {
+  const entryIds = requestedTimeEntryIds(input);
+  if (!entryIds.length || typeof input.isBillable !== "boolean") {
+    const error = new Error("Choose one or more source time entries and a billable state.");
     error.statusCode = 400;
     throw error;
   }
@@ -1678,6 +2360,7 @@ export async function updateQuotePreviewTimeEntryBillable(id, input = {}) {
 
   try {
     await database.query("begin");
+    await acquireDraftTransactionLock(database, id);
 
     const previewResult = await database.query(
       `
@@ -1691,6 +2374,13 @@ export async function updateQuotePreviewTimeEntryBillable(id, input = {}) {
           preview.quote_date::text as "quoteDate",
           preview.expiry_date::text as "expiryDate",
           preview.status as "previewStatus",
+          preview.document_type as "documentType",
+          preview.version::int as version,
+          preview.archived_at as "archivedAt",
+          preview.editing_by as "editingBy",
+          preview.editing_session_id::text as "editingSessionId",
+          preview.editing_expires_at as "editingExpiresAt",
+          editor.display_name as "editingByName",
           client.id as "billingClientId",
           client.abbreviation,
           client.account_code as "accountCode",
@@ -1708,6 +2398,7 @@ export async function updateQuotePreviewTimeEntryBillable(id, input = {}) {
         from quote_previews preview
         join billing_clients client on client.id = preview.billing_client_id
         left join teamwork_projects project on project.id = client.teamwork_project_id
+        left join app_users editor on editor.id = preview.editing_by
         where preview.id = $1
         for update of preview
       `,
@@ -1726,6 +2417,7 @@ export async function updateQuotePreviewTimeEntryBillable(id, input = {}) {
       error.statusCode = 409;
       throw error;
     }
+    const access = assertDraftMutation(previewRow, input, actor);
 
     const billingClient = mapBillingClient({
       ...previewRow,
@@ -1791,8 +2483,9 @@ export async function updateQuotePreviewTimeEntryBillable(id, input = {}) {
       [billingClient.teamworkProjectId, previewRow.periodStart, previewRow.periodEnd]
     );
 
-    if (!entriesResult.rows.some((row) => String(row.id) === entryId)) {
-      const error = new Error("Source time entry is not part of this document preview.");
+    const availableEntryIds = new Set(entriesResult.rows.map((row) => String(row.id)));
+    if (entryIds.some((entryId) => !availableEntryIds.has(entryId))) {
+      const error = new Error("One or more source time entries are not part of this document preview.");
       error.statusCode = 404;
       throw error;
     }
@@ -1813,7 +2506,7 @@ export async function updateQuotePreviewTimeEntryBillable(id, input = {}) {
       if (!sourceTimeEntryId || typeof event.metadata?.isBillable !== "boolean") continue;
       billableOverrides.set(sourceTimeEntryId, event.metadata.isBillable);
     }
-    billableOverrides.set(entryId, input.isBillable);
+    for (const entryId of entryIds) billableOverrides.set(entryId, input.isBillable);
 
     let entries = entriesResult.rows.map(mapEntry).map((entry) =>
       billableOverrides.has(String(entry.id))
@@ -1851,16 +2544,15 @@ export async function updateQuotePreviewTimeEntryBillable(id, input = {}) {
 
     await database.query(
       `
-        insert into quote_events (quote_preview_id, action, metadata)
-        values ($1, 'time_entry_billable_override', $2)
+        insert into quote_events (quote_preview_id, user_id, action, metadata)
+        select
+          $1,
+          $2,
+          'time_entry_billable_override',
+          jsonb_build_object('isBillable', $3::boolean, 'sourceTimeEntryId', source_entry_id)
+        from unnest($4::text[]) as source_entry_id
       `,
-      [
-        id,
-        JSON.stringify({
-          isBillable: input.isBillable,
-          sourceTimeEntryId: entryId
-        })
-      ]
+      [id, access.userId, input.isBillable, entryIds]
     );
 
     await database.query(
@@ -1869,10 +2561,13 @@ export async function updateQuotePreviewTimeEntryBillable(id, input = {}) {
         set
           warnings = $2,
           totals = $3,
+          last_edited_by = $4,
+          editing_expires_at = now() + interval '10 minutes',
+          version = version + 1,
           updated_at = now()
         where id = $1
       `,
-      [id, JSON.stringify(preview.warnings), JSON.stringify(preview.totals)]
+      [id, JSON.stringify(preview.warnings), JSON.stringify(preview.totals), access.userId]
     );
 
     await database.query("commit");
@@ -1882,7 +2577,10 @@ export async function updateQuotePreviewTimeEntryBillable(id, input = {}) {
       expiryDate: previewRow.expiryDate,
       insertRow: {
         created_at: previewRow.created_at,
-        id
+        document_type: previewRow.documentType,
+        id,
+        updated_at: new Date(),
+        version: Number(previewRow.version) + 1
       },
       lines: savedLines,
       preview,
@@ -1899,7 +2597,7 @@ export async function updateQuotePreviewTimeEntryBillable(id, input = {}) {
   }
 }
 
-export async function sendQuotePreviewToXero(id, input = {}) {
+export async function sendQuotePreviewToXero(id, input = {}, actor = {}) {
   const pool = getDatabasePool();
   if (!pool) {
     const error = new Error("DATABASE_URL is not configured.");
@@ -1907,12 +2605,15 @@ export async function sendQuotePreviewToXero(id, input = {}) {
     throw error;
   }
 
-  const documentType = xeroDocumentType(input.documentType || input.xeroDocumentType);
-  const documentLabel = xeroDocumentLabel(documentType);
   const database = await pool.connect();
+  let sessionLockHeld = false;
+  let transactionOpen = false;
 
   try {
+    await acquireDraftSessionLock(database, id);
+    sessionLockHeld = true;
     await database.query("begin");
+    transactionOpen = true;
 
     const previewResult = await database.query(
       `
@@ -1926,6 +2627,13 @@ export async function sendQuotePreviewToXero(id, input = {}) {
           preview.expiry_date::text as "expiryDate",
           preview.status,
           preview.totals,
+          preview.document_type as "documentType",
+          preview.version::int as version,
+          preview.archived_at as "archivedAt",
+          preview.editing_by as "editingBy",
+          preview.editing_session_id::text as "editingSessionId",
+          preview.editing_expires_at as "editingExpiresAt",
+          editor.display_name as "editingByName",
           client.id as "billingClientId",
           client.abbreviation,
           client.account_code as "accountCode",
@@ -1940,6 +2648,7 @@ export async function sendQuotePreviewToXero(id, input = {}) {
           client.xero_contact_id as "xeroContactId"
         from quote_previews preview
         join billing_clients client on client.id = preview.billing_client_id
+        left join app_users editor on editor.id = preview.editing_by
         where preview.id = $1
         for update of preview
       `,
@@ -1958,6 +2667,9 @@ export async function sendQuotePreviewToXero(id, input = {}) {
       error.statusCode = 409;
       throw error;
     }
+    const access = assertDraftMutation(previewRow, input, actor);
+    const documentType = xeroDocumentType(input.documentType || input.xeroDocumentType || previewRow.documentType);
+    const documentLabel = xeroDocumentLabel(documentType);
 
     const existingXeroResult = await database.query(
       `
@@ -2037,7 +2749,46 @@ export async function sendQuotePreviewToXero(id, input = {}) {
       ...xeroPayload,
       headers: xeroPayloadHeaders(idempotencyKey)
     };
+
+    await database.query("commit");
+    transactionOpen = false;
+
     const xeroTransport = await sendQuoteRequestToXero(xeroPreparedRequest);
+
+    await database.query("begin");
+    transactionOpen = true;
+    const finalPreviewResult = await database.query(
+      `
+        select
+          preview.status,
+          preview.version::int as version,
+          preview.archived_at as "archivedAt",
+          preview.editing_by as "editingBy",
+          preview.editing_session_id::text as "editingSessionId",
+          preview.editing_expires_at as "editingExpiresAt",
+          editor.display_name as "editingByName"
+        from quote_previews preview
+        left join app_users editor on editor.id = preview.editing_by
+        where preview.id = $1
+        for update of preview
+      `,
+      [id]
+    );
+    if (!finalPreviewResult.rowCount || finalPreviewResult.rows[0].status !== "preview") {
+      throw draftError("This document has already been sent or approved.", 409, "DRAFT_NOT_EDITABLE");
+    }
+    const finalPreview = finalPreviewResult.rows[0];
+    if (Number(finalPreview.version) !== access.expectedVersion) {
+      throw draftError("This draft changed while it was being sent. Reload the latest version.", 409, "DRAFT_VERSION_CONFLICT", {
+        currentVersion: Number(finalPreview.version)
+      });
+    }
+    if (finalPreview.archivedAt || finalPreview.editingBy !== access.userId || finalPreview.editingSessionId !== access.editorSessionId) {
+      throw draftError("The draft editing lock changed while it was being sent.", 423, "DRAFT_LOCKED", {
+        editorName: finalPreview.editingByName || "",
+        expiresAt: finalPreview.editingExpiresAt || null
+      });
+    }
 
     const annualDeltas = await annualUsageDeltasForPreview(database, id);
     const annualUsageApplied = await applyAnnualUsageDeltas(database, {
@@ -2120,11 +2871,12 @@ export async function sendQuotePreviewToXero(id, input = {}) {
 
     await database.query(
       `
-        insert into quote_events (quote_preview_id, action, metadata)
-        values ($1, 'send_to_xero', $2)
+        insert into quote_events (quote_preview_id, user_id, action, metadata)
+        values ($1, $2, 'send_to_xero', $3)
       `,
       [
         id,
+        access.userId,
         JSON.stringify({
           annualUsageApplied,
           documentType,
@@ -2141,18 +2893,27 @@ export async function sendQuotePreviewToXero(id, input = {}) {
     await database.query(
       `
         update quote_previews
-        set status = $2, updated_at = now()
+        set status = $2,
+            document_type = $3,
+            last_edited_by = $4,
+            editing_by = null,
+            editing_session_id = null,
+            editing_expires_at = null,
+            version = version + 1,
+            updated_at = now()
         where id = $1
       `,
-      [id, previewStatus]
+      [id, previewStatus, documentType, access.userId]
     );
 
     await database.query("commit");
+    transactionOpen = false;
 
     return {
       preview: {
         id,
-        status: previewStatus
+        status: previewStatus,
+        version: Number(previewRow.version) + 1
       },
       xero: {
         amount,
@@ -2174,9 +2935,13 @@ export async function sendQuotePreviewToXero(id, input = {}) {
       }
     };
   } catch (error) {
-    await database.query("rollback");
+    if (transactionOpen) await database.query("rollback");
     throw error;
   } finally {
-    database.release();
+    try {
+      if (sessionLockHeld) await releaseDraftSessionLock(database, id);
+    } finally {
+      database.release();
+    }
   }
 }

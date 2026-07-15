@@ -50,7 +50,11 @@ async function request(path, options = {}) {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     if (response.status === 403) csrfTokenPromise = null;
-    throw new Error(payload.message || "Request failed.");
+    const error = new Error(payload.message || "Request failed.");
+    error.code = payload.code || "REQUEST_FAILED";
+    error.details = payload.details || {};
+    error.status = response.status;
+    throw error;
   }
   return payload;
 }
@@ -75,11 +79,14 @@ export function login(username, password) {
   });
 }
 
-export function logout() {
+export function logout(editorSessionId = "") {
   if (demoMode) {
     return Promise.resolve({ authenticated: true, user: { name: "demo" } });
   }
-  return request("/api/auth/logout", { method: "POST" }).finally(() => {
+  return request("/api/auth/logout", {
+    body: JSON.stringify({ editorSessionId }),
+    method: "POST"
+  }).finally(() => {
     csrfTokenPromise = null;
   });
 }
@@ -224,6 +231,50 @@ export function createQuotePreview(input) {
   });
 }
 
+export function getQuoteDrafts(editorSessionId = "") {
+  if (demoMode) return Promise.resolve({ archived: [], drafts: [] });
+  const params = new URLSearchParams();
+  if (editorSessionId) params.set("editorSessionId", editorSessionId);
+  return request(`/api/billing/quote-previews${params.size ? `?${params}` : ""}`);
+}
+
+export function acquireQuoteDraft(previewId, editorSessionId) {
+  if (demoMode) return Promise.resolve({ preview: null });
+  return request(`/api/billing/quote-previews/${previewId}/editor-lock`, {
+    body: JSON.stringify({ editorSessionId }),
+    method: "POST"
+  });
+}
+
+export function renewQuoteDraft(previewId, editorSessionId) {
+  if (demoMode) return Promise.resolve({ lock: null });
+  return request(`/api/billing/quote-previews/${previewId}/editor-lock`, {
+    body: JSON.stringify({ editorSessionId }),
+    method: "PATCH"
+  });
+}
+
+export function getArchivedQuoteDraft(previewId) {
+  if (demoMode) return Promise.resolve({ preview: null });
+  return request(`/api/billing/quote-previews/${previewId}`);
+}
+
+export function archiveQuoteDraft(previewId, input) {
+  if (demoMode) return Promise.resolve({ draft: { id: previewId } });
+  return request(`/api/billing/quote-previews/${previewId}/archive`, {
+    body: JSON.stringify(input),
+    method: "POST"
+  });
+}
+
+export function restoreQuoteDraft(previewId, input) {
+  if (demoMode) return Promise.resolve({ preview: null });
+  return request(`/api/billing/quote-previews/${previewId}/restore`, {
+    body: JSON.stringify(input),
+    method: "POST"
+  });
+}
+
 export function updateQuotePreview(id, input) {
   if (demoMode) {
     return Promise.resolve({ preview: { ...input, id } });
@@ -234,12 +285,22 @@ export function updateQuotePreview(id, input) {
   });
 }
 
-export function updateQuoteTimeEntryBillable(previewId, entryId, isBillable) {
+export function updateQuoteTimeEntryBillable(previewId, entryId, isBillable, lifecycle = {}) {
   if (demoMode) {
     return Promise.resolve({ preview: null });
   }
   return request(`/api/billing/quote-previews/${previewId}/time-entries/${entryId}`, {
-    body: JSON.stringify({ isBillable }),
+    body: JSON.stringify({ ...lifecycle, isBillable }),
+    method: "PATCH"
+  });
+}
+
+export function updateQuoteTimeEntriesBillable(previewId, entryIds, isBillable, lifecycle = {}) {
+  if (demoMode) {
+    return Promise.resolve({ preview: null });
+  }
+  return request(`/api/billing/quote-previews/${previewId}/time-entries`, {
+    body: JSON.stringify({ ...lifecycle, entryIds, isBillable }),
     method: "PATCH"
   });
 }
