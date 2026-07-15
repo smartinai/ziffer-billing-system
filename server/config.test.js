@@ -27,7 +27,10 @@ async function importConfigWithEnv(env) {
 
 test("production config rejects missing deployment secrets", async () => {
   await assert.rejects(
-    () => importConfigWithEnv({ NODE_ENV: "production" }),
+    () => importConfigWithEnv({
+      DATABASE_URL: "postgres://ziffer:secret@postgres:5432/ziffer_billing",
+      NODE_ENV: "production"
+    }),
     /SESSION_SECRET must be set/
   );
 });
