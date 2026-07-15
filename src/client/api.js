@@ -109,6 +109,13 @@ export function getSummary(range) {
   return request(`/api/reporting/summary?${params}`);
 }
 
+export function getReportingSourceStatus() {
+  if (demoMode) {
+    return Promise.resolve({ lastAttempt: null, lastScheduledAttempt: null, lastSuccess: null, schedule: null });
+  }
+  return request("/api/reporting/source-status");
+}
+
 export function refreshSummary(range) {
   if (demoMode) {
     return getDemoSummary(range);

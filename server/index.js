@@ -77,8 +77,12 @@ function parseDateRange(req, res) {
   return { endDate, startDate };
 }
 
-app.get("/api/reporting/source-status", requireAuth, (_req, res) => {
-  res.json(getSourceStatus());
+app.get("/api/reporting/source-status", requireAuth, async (_req, res, next) => {
+  try {
+    res.json(await getSourceStatus());
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.get("/api/reporting/summary", requireAuth, async (req, res, next) => {

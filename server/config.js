@@ -95,6 +95,8 @@ export const config = {
   teamworkApiKey: productionRequired("TEAMWORK_API_KEY"),
   teamworkAuthMode: process.env.TEAMWORK_AUTH_MODE || "basic",
   teamworkBaseUrls: buildTeamworkBaseUrls(),
+  teamworkScheduledSyncAttempts: Math.max(1, Number(process.env.TEAMWORK_SCHEDULED_SYNC_ATTEMPTS || 4)),
+  teamworkScheduledSyncRetryMs: Math.max(0, Number(process.env.TEAMWORK_SCHEDULED_SYNC_RETRY_MS || 10 * 60 * 1000)),
   timezone: process.env.DEFAULT_TIMEZONE || "Europe/Amsterdam",
   xeroApiBaseUrl: normalizeBaseUrl(process.env.XERO_API_BASE_URL || "https://api.xero.com/api.xro/2.0"),
   xeroAuthUrl: process.env.XERO_AUTH_URL || "https://login.xero.com/identity/connect/authorize",

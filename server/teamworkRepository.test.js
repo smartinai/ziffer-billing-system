@@ -59,3 +59,33 @@ test("reconstructs a reporting store from normalized PostgreSQL rows", () => {
 test("does not build a reporting store without a complete sync run", () => {
   assert.equal(teamworkRepositoryTestHooks.buildTeamworkStoreFromDatabaseRows({ projects: [], run: null, users: [] }), null);
 });
+
+test("normalizes persisted Teamwork sync status rows", () => {
+  assert.deepEqual(teamworkRepositoryTestHooks.syncRunSummary({
+    attempt: 2,
+    coverage_end: "2026-07-16",
+    coverage_start: "2026-01-01",
+    error_message: "",
+    fetch_end: "2026-07-16",
+    fetch_start: "2026-07-15",
+    finished_at: new Date("2026-07-16T00:02:00Z"),
+    id: "run-2",
+    partial: false,
+    started_at: new Date("2026-07-16T00:00:00Z"),
+    status: "complete",
+    trigger: "scheduled"
+  }), {
+    attempt: 2,
+    coverageEnd: "2026-07-16",
+    coverageStart: "2026-01-01",
+    errorMessage: "",
+    fetchEnd: "2026-07-16",
+    fetchStart: "2026-07-15",
+    finishedAt: "2026-07-16T00:02:00.000Z",
+    id: "run-2",
+    partial: false,
+    startedAt: "2026-07-16T00:00:00.000Z",
+    status: "complete",
+    trigger: "scheduled"
+  });
+});

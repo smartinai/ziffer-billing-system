@@ -18,6 +18,7 @@
     "db:production:backup": "node scripts/backup-production-db.mjs",
     "db:production:restore": "node scripts/restore-production-db.mjs",
     "db:seed-mock-quotes": "node scripts/seed-mock-quotes.mjs",
+    "sync:teamwork:scheduled": "node scripts/sync-teamwork-scheduled.mjs",
     "start": "node server/index.js",
     "test": "node --test",
     "test:visual": "node scripts/visual-check.mjs",

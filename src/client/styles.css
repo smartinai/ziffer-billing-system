@@ -509,6 +509,25 @@ button {
   gap: 18px;
 }
 
+.reporting-sync-control {
+  display: grid;
+  justify-items: end;
+  gap: 4px;
+}
+
+.reporting-sync-status {
+  max-width: 260px;
+  color: #6f7472;
+  font-size: 11px;
+  line-height: 1.25;
+  text-align: right;
+}
+
+.reporting-sync-status-error {
+  color: #a44736;
+  font-weight: 700;
+}
+
 .content-stack[hidden] {
   display: none;
 }
@@ -3023,6 +3042,14 @@ td strong {
     justify-content: flex-start;
   }
 
+  .reporting-sync-control {
+    justify-items: start;
+  }
+
+  .reporting-sync-status {
+    text-align: left;
+  }
+
   .metric-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -3103,6 +3130,10 @@ td strong {
   .reporting-sort-select,
   .search-field,
   .refresh-button {
+    width: 100%;
+  }
+
+  .reporting-sync-control {
     width: 100%;
   }
 

@@ -43,6 +43,7 @@ import {
   getBillingQuotes,
   getSession,
   getSummary,
+  getReportingSourceStatus,
   getQuoteDrafts,
   getXeroStatus,
   login,
@@ -1218,6 +1219,7 @@ function PeriodSelector({
   refreshTitle,
   refreshing,
   setRange,
+  syncStatus,
   onRefresh
 }) {
   const selectedMonth = selectedMonthPeriod(range);
@@ -1267,17 +1269,64 @@ function PeriodSelector({
           type="date"
         />
       </label>
-      <button
-        className="refresh-button"
-        disabled={refreshing || demo}
-        onClick={onRefresh}
-        title={refreshTitle || (demo ? "Demo data is bundled into this Netlify build" : "Sync Teamwork")}
-        type="button"
-      >
-        <RefreshCw className={refreshing ? "spin" : ""} size={17} />
-        {buttonLabel}
-      </button>
+      <div className="reporting-sync-control">
+        <button
+          className="refresh-button"
+          disabled={refreshing || demo}
+          onClick={onRefresh}
+          title={refreshTitle || (demo ? "Demo data is bundled into this Netlify build" : "Sync Teamwork")}
+          type="button"
+        >
+          <RefreshCw className={refreshing ? "spin" : ""} size={17} />
+          {buttonLabel}
+        </button>
+        {syncStatus ? <ReportingSyncStatus status={syncStatus} /> : null}
+      </div>
     </div>
+  );
+}
+
+function syncTimestamp(value, timezone) {
+  if (!value) return "";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "";
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    month: "short",
+    timeZone: timezone || "Europe/Amsterdam"
+  }).format(parsed);
+}
+
+function ReportingSyncStatus({ status }) {
+  const timezone = status.schedule?.timezone || "Europe/Amsterdam";
+  const lastSuccess = status.lastSuccess;
+  const lastAttempt = status.lastScheduledAttempt;
+  const failedAfterSuccess = lastAttempt?.status === "failed"
+    && (!lastSuccess?.finishedAt || new Date(lastAttempt.startedAt) > new Date(lastSuccess.finishedAt));
+
+  if (failedAfterSuccess) {
+    return (
+      <span className="reporting-sync-status reporting-sync-status-error" role="status">
+        Nightly sync failed {syncTimestamp(lastAttempt.finishedAt || lastAttempt.startedAt, timezone)}.
+        {lastSuccess?.finishedAt ? ` Last success ${syncTimestamp(lastSuccess.finishedAt, timezone)}.` : ""}
+      </span>
+    );
+  }
+
+  if (lastSuccess?.finishedAt) {
+    return (
+      <span className="reporting-sync-status" role="status">
+        Last synced {syncTimestamp(lastSuccess.finishedAt, timezone)} - daily at {status.schedule?.time || "00:00"}
+      </span>
+    );
+  }
+
+  return (
+    <span className="reporting-sync-status" role="status">
+      Scheduled daily at {status.schedule?.time || "00:00"}
+    </span>
   );
 }
 
@@ -3801,6 +3850,8 @@ const auditActionLabels = {
   logout: "Logout",
   send_to_xero: "Sent to Xero",
   teamwork_sync_refresh: "Teamwork refreshed",
+  teamwork_sync_scheduled_failure: "Scheduled Teamwork sync failed",
+  teamwork_sync_scheduled_success: "Scheduled Teamwork sync completed",
   time_entry_billable_update: "Billable state changed",
   xero_connect: "Xero connected",
   xero_disconnect: "Xero disconnected",
@@ -3814,6 +3865,7 @@ const auditEntityLabels = {
   billing_client: "Billing client",
   quote_preview: "Document preview",
   teamwork_report: "Teamwork report",
+  teamwork_sync: "Teamwork sync",
   teamwork_time_entry: "Time entry",
   xero: "Xero",
   xero_document: "Xero document"
@@ -4539,6 +4591,7 @@ function Shell({ onLogout, onUserUpdated, user }) {
   const hashNavigationVersionRef = useRef(0);
   const [range, setRange] = useState({ endDate: today(), startDate: "2026-01-01" });
   const [report, setReport] = useState(null);
+  const [reportingSourceStatus, setReportingSourceStatus] = useState(null);
   const [billingClients, setBillingClients] = useState([]);
   const [billingClientsLoading, setBillingClientsLoading] = useState(false);
   const [billingQuotes, setBillingQuotes] = useState([]);
@@ -4568,7 +4621,12 @@ function Shell({ onLogout, onUserUpdated, user }) {
     setLoading(true);
     setError("");
     try {
-      setReport(await getSummary(nextRange));
+      const [nextReport, nextSourceStatus] = await Promise.all([
+        getSummary(nextRange),
+        getReportingSourceStatus().catch(() => null)
+      ]);
+      setReport(nextReport);
+      if (nextSourceStatus) setReportingSourceStatus(nextSourceStatus);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -4738,6 +4796,7 @@ function Shell({ onLogout, onUserUpdated, user }) {
     setError("");
     try {
       setReport(await refreshSummary(range));
+      setReportingSourceStatus(await getReportingSourceStatus());
     } catch (err) {
       setError(err.message);
     } finally {
@@ -4966,6 +5025,7 @@ function Shell({ onLogout, onUserUpdated, user }) {
               refreshTitle={isDocsTab ? "Refresh Docs" : undefined}
               refreshing={isDocsTab ? billingQuotesLoading : refreshing}
               setRange={setRange}
+              syncStatus={isDocsTab ? null : reportingSourceStatus}
               onRefresh={isDocsTab ? refreshBillingQuotesFromXero : handleRefresh}
             />
           ) : null}

@@ -93,6 +93,164 @@ function jsonb(value) {
   return JSON.stringify(value ?? {});
 }
 
+function syncRunSummary(row) {
+  if (!row) return null;
+  return {
+    attempt: Number(row.attempt || 1),
+    coverageEnd: dateOnly(row.coverage_end),
+    coverageStart: dateOnly(row.coverage_start),
+    errorMessage: row.error_message || "",
+    fetchEnd: dateOnly(row.fetch_end),
+    fetchStart: dateOnly(row.fetch_start),
+    finishedAt: timestamp(row.finished_at),
+    id: row.id,
+    partial: Boolean(row.partial),
+    startedAt: timestamp(row.started_at),
+    status: row.status || "",
+    trigger: row.trigger || "manual"
+  };
+}
+
+export async function acquireTeamworkSyncLock() {
+  if (!isDatabaseConfigured()) {
+    return { acquired: true, release: async () => {} };
+  }
+
+  const client = await getDatabasePool().connect();
+  let released = false;
+  try {
+    const result = await client.query(
+      "select pg_try_advisory_lock(hashtext($1)) as acquired",
+      ["ziffer:teamwork-sync"]
+    );
+    if (!result.rows[0]?.acquired) {
+      client.release();
+      return { acquired: false, release: async () => {} };
+    }
+
+    return {
+      acquired: true,
+      async release() {
+        if (released) return;
+        released = true;
+        try {
+          await client.query("select pg_advisory_unlock(hashtext($1))", ["ziffer:teamwork-sync"]);
+        } finally {
+          client.release();
+        }
+      }
+    };
+  } catch (error) {
+    client.release();
+    throw error;
+  }
+}
+
+export async function createTeamworkSyncRun({
+  attempt = 1,
+  coverageEnd,
+  coverageStart,
+  fetchEnd,
+  fetchStart,
+  source = {},
+  trigger = "manual"
+}) {
+  if (!isDatabaseConfigured()) return null;
+  const result = await getDatabasePool().query(
+    `
+      insert into teamwork_sync_runs (
+        started_at, coverage_start, coverage_end, status, partial, source,
+        trigger, fetch_start, fetch_end, attempt, error_message
+      )
+      values (clock_timestamp(), $1, $2, 'running', false, $3, $4, $5, $6, $7, '')
+      returning id
+    `,
+    [
+      coverageStart || null,
+      coverageEnd || null,
+      jsonb(source),
+      trigger,
+      fetchStart || null,
+      fetchEnd || null,
+      Math.max(1, Number(attempt || 1))
+    ]
+  );
+  return result.rows[0]?.id || null;
+}
+
+export async function failTeamworkSyncRun(syncRunId, { errorMessage = "", partial = false, warnings = [] } = {}) {
+  if (!syncRunId || !isDatabaseConfigured()) return;
+  await getDatabasePool().query(
+    `
+      update teamwork_sync_runs
+      set
+        finished_at = clock_timestamp(),
+        status = 'failed',
+        partial = $2,
+        warnings = $3,
+        error_message = $4
+      where id = $1
+    `,
+    [syncRunId, Boolean(partial), jsonb(warnings), String(errorMessage || "").slice(0, 500)]
+  );
+}
+
+export async function getLatestSuccessfulTeamworkSyncRun() {
+  if (!isDatabaseConfigured()) return null;
+  const result = await getDatabasePool().query(`
+    select
+      id, started_at, finished_at, coverage_start::text as coverage_start,
+      coverage_end::text as coverage_end, status, partial, trigger,
+      fetch_start::text as fetch_start, fetch_end::text as fetch_end, attempt, error_message
+    from teamwork_sync_runs
+    where status = 'complete' and partial = false
+    order by finished_at desc nulls last, started_at desc
+    limit 1
+  `);
+  return syncRunSummary(result.rows[0]);
+}
+
+export async function getTeamworkSyncStatus() {
+  if (!isDatabaseConfigured()) return { lastAttempt: null, lastScheduledAttempt: null, lastSuccess: null };
+  const pool = getDatabasePool();
+  const [attemptResult, scheduledResult, successResult] = await Promise.all([
+    pool.query(`
+      select
+        id, started_at, finished_at, coverage_start::text as coverage_start,
+        coverage_end::text as coverage_end, status, partial, trigger,
+        fetch_start::text as fetch_start, fetch_end::text as fetch_end, attempt, error_message
+      from teamwork_sync_runs
+      order by started_at desc
+      limit 1
+    `),
+    pool.query(`
+      select
+        id, started_at, finished_at, coverage_start::text as coverage_start,
+        coverage_end::text as coverage_end, status, partial, trigger,
+        fetch_start::text as fetch_start, fetch_end::text as fetch_end, attempt, error_message
+      from teamwork_sync_runs
+      where trigger = 'scheduled'
+      order by started_at desc
+      limit 1
+    `),
+    pool.query(`
+      select
+        id, started_at, finished_at, coverage_start::text as coverage_start,
+        coverage_end::text as coverage_end, status, partial, trigger,
+        fetch_start::text as fetch_start, fetch_end::text as fetch_end, attempt, error_message
+      from teamwork_sync_runs
+      where status = 'complete' and partial = false
+      order by finished_at desc nulls last, started_at desc
+      limit 1
+    `)
+  ]);
+  return {
+    lastAttempt: syncRunSummary(attemptResult.rows[0]),
+    lastScheduledAttempt: syncRunSummary(scheduledResult.rows[0]),
+    lastSuccess: syncRunSummary(successResult.rows[0])
+  };
+}
+
 async function upsertUsers(client, users, rawUsersById, syncRunId) {
   for (const user of users) {
     await client.query(
@@ -215,7 +373,7 @@ async function upsertTimeEntries(client, timeEntries, rawTimeEntriesById, syncRu
   }
 }
 
-export async function persistTeamworkStoreToDatabase(store, raw = {}) {
+export async function persistTeamworkStoreToDatabase(store, raw = {}, options = {}) {
   if (!isDatabaseConfigured()) {
     return {
       configured: false,
@@ -232,33 +390,46 @@ export async function persistTeamworkStoreToDatabase(store, raw = {}) {
   const api = store.api || {};
   const source = {
     api,
+    fetchWindow: {
+      end: options.fetchEnd || store.coverageEnd || null,
+      start: options.fetchStart || store.coverageStart || null
+    },
     rowCounts: {
       projects: projects.length,
       timeEntries: timeEntries.length,
       users: users.length
-    }
+    },
+    trigger: options.trigger || "manual"
   };
 
   try {
     await client.query("begin");
-    const run = await client.query(
-      `
-        insert into teamwork_sync_runs (
-          coverage_start, coverage_end, status, pages_fetched, partial, warnings, source
-        )
-        values ($1, $2, 'running', $3, $4, $5, $6)
-        returning id
-      `,
-      [
-        store.coverageStart || null,
-        store.coverageEnd || null,
-        Number(api.pagesFetched || 0),
-        Boolean(api.partial),
-        jsonb(api.warnings || []),
-        jsonb(source)
-      ]
-    );
-    const syncRunId = run.rows[0].id;
+    let syncRunId = options.syncRunId || null;
+    if (!syncRunId) {
+      const run = await client.query(
+        `
+          insert into teamwork_sync_runs (
+            started_at, coverage_start, coverage_end, status, pages_fetched, partial, warnings, source,
+            trigger, fetch_start, fetch_end, attempt, error_message
+          )
+          values (clock_timestamp(), $1, $2, 'running', $3, $4, $5, $6, $7, $8, $9, $10, '')
+          returning id
+        `,
+        [
+          store.coverageStart || null,
+          store.coverageEnd || null,
+          Number(api.pagesFetched || 0),
+          Boolean(api.partial),
+          jsonb(api.warnings || []),
+          jsonb(source),
+          options.trigger || "import",
+          options.fetchStart || store.coverageStart || null,
+          options.fetchEnd || store.coverageEnd || null,
+          Math.max(1, Number(options.attempt || 1))
+        ]
+      );
+      syncRunId = run.rows[0].id;
+    }
 
     await upsertUsers(client, users, rawRowsById(raw.users), syncRunId);
     await upsertProjects(client, projects, rawRowsById(raw.projects), syncRunId);
@@ -274,10 +445,23 @@ export async function persistTeamworkStoreToDatabase(store, raw = {}) {
     await client.query(
       `
         update teamwork_sync_runs
-        set finished_at = now(), status = 'complete'
+        set
+          finished_at = clock_timestamp(),
+          status = 'complete',
+          pages_fetched = $2,
+          partial = $3,
+          warnings = $4,
+          source = $5,
+          error_message = ''
         where id = $1
       `,
-      [syncRunId]
+      [
+        syncRunId,
+        Number(api.pagesFetched || 0),
+        Boolean(api.partial),
+        jsonb(api.warnings || []),
+        jsonb(source)
+      ]
     );
     await client.query("commit");
 
@@ -306,9 +490,12 @@ export async function readTeamworkStoreFromDatabase() {
   try {
     await client.query("begin transaction isolation level repeatable read read only");
     const runResult = await client.query(`
-      select id, coverage_start, coverage_end, pages_fetched, partial, warnings, source, finished_at, created_at
+      select
+        id, coverage_start::text as coverage_start, coverage_end::text as coverage_end,
+        pages_fetched, partial, warnings, source, finished_at, created_at
       from teamwork_sync_runs
       where status = 'complete'
+        and partial = false
         and coverage_start is not null
         and coverage_end is not null
       order by finished_at desc nulls last, created_at desc
@@ -332,7 +519,7 @@ export async function readTeamworkStoreFromDatabase() {
     `);
     const timeEntriesResult = await client.query(`
       select
-        id, logged_on, minutes, hours, is_billable, user_id, project_id,
+        id, logged_on::text as logged_on, minutes, hours, is_billable, user_id, project_id,
         task_id, task_name, description, tags, teamwork_invoice_id,
         created_at_source, updated_at_source
       from teamwork_time_entries
@@ -356,5 +543,6 @@ export async function readTeamworkStoreFromDatabase() {
 }
 
 export const teamworkRepositoryTestHooks = {
-  buildTeamworkStoreFromDatabaseRows
+  buildTeamworkStoreFromDatabaseRows,
+  syncRunSummary
 };
