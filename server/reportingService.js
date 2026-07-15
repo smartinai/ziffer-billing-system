@@ -5,7 +5,7 @@ import { normalizeProjects, normalizeTimeEntries, normalizeUsers } from "./norma
 import { listReportingDocumentAggregates } from "./reportingDocumentAggregateRepository.js";
 import { fetchProjects, fetchTimeEntries, fetchUsers, getTeamworkStatus } from "./teamworkClient.js";
 import { hasStoredReportingData, readTeamworkStore, writeTeamworkStore } from "./teamworkStore.js";
-import { persistTeamworkStoreToDatabase } from "./teamworkRepository.js";
+import { persistTeamworkStoreToDatabase, readTeamworkStoreFromDatabase } from "./teamworkRepository.js";
 
 let sourceStatus = {
   coverageEnd: null,
@@ -128,6 +128,23 @@ async function ensureStoredData() {
     sourceStatus = summarizeStore(store);
     return store;
   }
+
+  try {
+    const databaseStore = await readTeamworkStoreFromDatabase();
+    if (hasStoredReportingData(databaseStore)) {
+      let restoredStore = databaseStore;
+      try {
+        restoredStore = await writeTeamworkStore(databaseStore);
+      } catch (error) {
+        console.error(`Could not persist PostgreSQL reporting cache: ${error.message}`);
+      }
+      sourceStatus = summarizeStore(restoredStore, "stored");
+      return restoredStore;
+    }
+  } catch (error) {
+    console.error(`Could not restore reporting cache from PostgreSQL: ${error.message}`);
+  }
+
   return syncTeamworkStore();
 }
 
