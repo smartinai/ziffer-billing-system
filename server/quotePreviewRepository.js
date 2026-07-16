@@ -1,7 +1,9 @@
 import { buildAggregatedQuotePreview, splitManualLineForAnnualCoverage } from "../src/shared/quoteDrafts.js";
+import crypto from "node:crypto";
 import { getDatabasePool } from "./db.js";
+import { openAlertIncident, resolveAlertIncident } from "./operationsRepository.js";
 import { fetchTask } from "./teamworkClient.js";
-import { sendQuoteRequestToXero } from "./xeroClient.js";
+import { findXeroDocumentByNumber, sendQuoteRequestToXero } from "./xeroClient.js";
 
 const validDate = /^\d{4}-\d{2}-\d{2}$/;
 const validUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -69,6 +71,16 @@ function assertDraftMutation(row, input, actor) {
 
   if (!userId) throw draftError("Authentication required.", 401, "AUTH_REQUIRED");
   if (row.archivedAt) throw draftError("Restore this archived draft before editing it.", 409, "DRAFT_ARCHIVED");
+  if (row.sendState && row.sendState !== "idle" && row.sendState !== "failed") {
+    throw draftError(
+      row.sendState === "unknown"
+        ? "This draft has an unresolved Xero send. Reconcile it before editing."
+        : "This draft is currently being sent to Xero.",
+      409,
+      "XERO_SEND_IN_PROGRESS",
+      { sendState: row.sendState }
+    );
+  }
   if (!Number.isInteger(expectedVersion) || expectedVersion < 1) {
     throw draftError("A valid draft version is required.", 400, "INVALID_DRAFT_VERSION");
   }
@@ -296,9 +308,12 @@ export const quoteDraftTestHooks = {
   assertDraftMutation,
   draftLockKey,
   mapDocumentNumberConflict,
+  ambiguousXeroError,
   quoteLineSourceSnapshot,
   requestedTimeEntryIds,
-  savedQuoteLine
+  savedQuoteLine,
+  xeroIdempotencyKey,
+  xeroTransportFromLookup
 };
 
 async function loadQuoteServiceOverrides(database, previewId) {
@@ -793,6 +808,25 @@ function xeroDocumentIdentifier(transport) {
   return transport.documentId || transport.invoiceId || transport.quoteId || "";
 }
 
+function xeroTransportFromLookup(lookup, documentType) {
+  const document = lookup?.document;
+  if (!document) return null;
+  const isInvoice = documentType === "draft_invoice";
+  const documentId = compactText(isInvoice ? document.InvoiceID : document.QuoteID);
+  return {
+    mode: "live",
+    tenantId: lookup.tenantId || "",
+    tenantName: lookup.tenantName || "",
+    payload: lookup.payload || { [isInvoice ? "Invoices" : "Quotes"]: [document] },
+    documentId,
+    invoiceId: isInvoice ? documentId : "",
+    quoteId: isInvoice ? "" : documentId,
+    status: compactText(document.Status || "DRAFT"),
+    xeroStatus: compactText(document.Status || "DRAFT"),
+    reconciled: true
+  };
+}
+
 function xeroPreparedResponse(documentLabel) {
   return {
     mode: "prepared",
@@ -836,6 +870,13 @@ async function loadDraftPreview(database, id, { persistLegacySnapshots = false }
         preview.warnings,
         preview.totals,
         preview.document_type as "documentType",
+        preview.send_state as "sendState",
+        attempt.id as "sendAttemptId",
+        attempt.state as "sendAttemptState",
+        attempt.attempt_count::int as "sendAttemptCount",
+        attempt.last_attempt_at as "sendAttemptAt",
+        attempt.last_error as "sendAttemptError",
+        attempt.xero_document_id as "sendAttemptXeroDocumentId",
         preview.version::int as version,
         preview.archived_at as "archivedAt",
         preview.editing_by as "editingBy",
@@ -860,6 +901,7 @@ async function loadDraftPreview(database, id, { persistLegacySnapshots = false }
       join billing_clients client on client.id = preview.billing_client_id
       left join teamwork_projects project on project.id = client.teamwork_project_id
       left join app_users editor on editor.id = preview.editing_by
+      left join xero_send_attempts attempt on attempt.id = preview.active_send_attempt_id
       where preview.id = $1
     `,
     [id]
@@ -987,6 +1029,15 @@ async function loadDraftPreview(database, id, { persistLegacySnapshots = false }
       reference: row.reference,
       services,
       status: row.status,
+      xeroSendState: row.sendState || "idle",
+      xeroSendAttempt: row.sendAttemptId ? {
+        id: row.sendAttemptId,
+        state: row.sendAttemptState,
+        attemptCount: Number(row.sendAttemptCount || 0),
+        lastAttemptAt: row.sendAttemptAt,
+        errorMessage: row.sendAttemptError || "",
+        xeroDocumentId: row.sendAttemptXeroDocumentId || ""
+      } : null,
       totals: row.totals || {},
       updatedAt: row.updatedAt,
       version: Number(row.version || 1),
@@ -1017,6 +1068,7 @@ function draftSummary(row, editorSessionId = "") {
     quoteDate: row.quoteDate,
     quoteNumber: row.quoteNumber,
     reference: row.reference,
+    xeroSendState: row.sendState || "idle",
     totals: row.totals || {},
     updatedAt: row.updatedAt,
     version: Number(row.version || 1)
@@ -1040,6 +1092,7 @@ export async function listQuoteDrafts(input = {}) {
         preview.quote_date::text as "quoteDate",
         preview.expiry_date::text as "expiryDate",
         preview.document_type as "documentType",
+        preview.send_state as "sendState",
         preview.version::int as version,
         preview.totals,
         client.display_name as "clientName",
@@ -1082,6 +1135,7 @@ export async function acquireQuoteDraftLock(id, input = {}, actor = {}) {
       `
         select
           preview.status,
+          preview.send_state as "sendState",
           preview.archived_at as "archivedAt",
           preview.editing_by as "editingBy",
           preview.editing_session_id::text as "editingSessionId",
@@ -1097,6 +1151,14 @@ export async function acquireQuoteDraftLock(id, input = {}, actor = {}) {
     if (!currentResult.rowCount) throw draftError("Draft not found.", 404, "DRAFT_NOT_FOUND");
     const current = currentResult.rows[0];
     if (current.status !== "preview") throw draftError("This document has already been sent.", 409, "DRAFT_NOT_EDITABLE");
+    if (
+      current.sendState
+      && current.sendState !== "idle"
+      && current.sendState !== "failed"
+      && (!activeLock(current) || current.editingBy !== userId || current.editingSessionId !== editorSessionId)
+    ) {
+      throw draftError("This draft has an unresolved Xero send.", 409, "XERO_SEND_IN_PROGRESS", { sendState: current.sendState });
+    }
     if (current.archivedAt) throw draftError("Restore this archived draft before editing it.", 409, "DRAFT_ARCHIVED");
     if (activeLock(current) && (current.editingBy !== userId || current.editingSessionId !== editorSessionId)) {
       throw draftError(`This draft is currently being edited by ${current.editingByName || "another user"}.`, 423, "DRAFT_LOCKED", {
@@ -1169,6 +1231,7 @@ export async function archiveQuoteDraft(id, input = {}, actor = {}) {
       `
         select
           preview.status,
+          preview.send_state as "sendState",
           preview.version::int as version,
           preview.archived_at as "archivedAt",
           preview.editing_by as "editingBy",
@@ -1319,6 +1382,30 @@ export async function releaseQuoteDraftLocksForSession(userId, editorSessionId) 
 
 function xeroIdempotencyKey(id, documentType) {
   return `quote-preview:${id}:xero:${documentType}:v1`;
+}
+
+function safeSendError(error) {
+  return compactText(error?.message || "Xero send failed.")
+    .replace(/(token|secret|password|authorization|cookie)\s*[:=]\s*[^\s,;]+/gi, "$1=[redacted]")
+    .slice(0, 1000);
+}
+
+function ambiguousXeroError(error) {
+  const status = Number(error?.statusCode || error?.status || 0);
+  return !status || status >= 500 || error?.name === "AbortError" || error?.name === "TypeError";
+}
+
+function mapSendAttempt(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    state: row.state,
+    attemptCount: Number(row.attemptCount ?? row.attempt_count ?? 0),
+    lastAttemptAt: row.lastAttemptAt ?? row.last_attempt_at ?? null,
+    errorMessage: row.lastError ?? row.last_error ?? "",
+    xeroDocumentId: row.xeroDocumentId ?? row.xero_document_id ?? "",
+    xeroQuoteId: row.xeroQuoteId ?? row.xero_quote_id ?? ""
+  };
 }
 
 function xeroPayloadHeaders(idempotencyKey) {
@@ -1749,6 +1836,7 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
           preview.status,
           preview.totals,
           preview.document_type as "documentType",
+          preview.send_state as "sendState",
           preview.version::int as version,
           preview.archived_at as "archivedAt",
           preview.editing_by as "editingBy",
@@ -2375,6 +2463,7 @@ export async function updateQuotePreviewTimeEntryBillable(id, input = {}, actor 
           preview.expiry_date::text as "expiryDate",
           preview.status as "previewStatus",
           preview.document_type as "documentType",
+          preview.send_state as "sendState",
           preview.version::int as version,
           preview.archived_at as "archivedAt",
           preview.editing_by as "editingBy",
@@ -2597,7 +2686,7 @@ export async function updateQuotePreviewTimeEntryBillable(id, input = {}, actor 
   }
 }
 
-export async function sendQuotePreviewToXero(id, input = {}, actor = {}) {
+export async function sendQuotePreviewToXero(id, input = {}, actor = {}, internal = {}) {
   const pool = getDatabasePool();
   if (!pool) {
     const error = new Error("DATABASE_URL is not configured.");
@@ -2608,6 +2697,8 @@ export async function sendQuotePreviewToXero(id, input = {}, actor = {}) {
   const database = await pool.connect();
   let sessionLockHeld = false;
   let transactionOpen = false;
+  let sendAttemptId = "";
+  let xeroRequestReturned = false;
 
   try {
     await acquireDraftSessionLock(database, id);
@@ -2628,6 +2719,7 @@ export async function sendQuotePreviewToXero(id, input = {}, actor = {}) {
           preview.status,
           preview.totals,
           preview.document_type as "documentType",
+          preview.send_state as "sendState",
           preview.version::int as version,
           preview.archived_at as "archivedAt",
           preview.editing_by as "editingBy",
@@ -2667,9 +2759,31 @@ export async function sendQuotePreviewToXero(id, input = {}, actor = {}) {
       error.statusCode = 409;
       throw error;
     }
-    const access = assertDraftMutation(previewRow, input, actor);
     const documentType = xeroDocumentType(input.documentType || input.xeroDocumentType || previewRow.documentType);
     const documentLabel = xeroDocumentLabel(documentType);
+
+    if (["sending", "unknown"].includes(previewRow.sendState)) {
+      const attemptResult = await database.query(
+        `select id, state, attempt_count as "attemptCount", last_attempt_at as "lastAttemptAt", last_error as "lastError", xero_document_id as "xeroDocumentId", xero_quote_id as "xeroQuoteId"
+         from xero_send_attempts where id = (select active_send_attempt_id from quote_previews where id = $1)`,
+        [id]
+      );
+      await database.query("commit");
+      transactionOpen = false;
+      return {
+        preview: { id, status: previewRow.status, version: Number(previewRow.version), xeroSendState: previewRow.sendState },
+        xero: {
+          state: previewRow.sendState,
+          attempt: mapSendAttempt(attemptResult.rows[0]),
+          message: previewRow.sendState === "unknown"
+            ? "The previous Xero send has an uncertain result and must be reconciled before retrying."
+            : "This document is already being sent to Xero."
+        },
+        reused: true
+      };
+    }
+
+    const access = assertDraftMutation(previewRow, input, actor);
 
     const existingXeroResult = await database.query(
       `
@@ -2750,10 +2864,70 @@ export async function sendQuotePreviewToXero(id, input = {}, actor = {}) {
       headers: xeroPayloadHeaders(idempotencyKey)
     };
 
+    const attemptResult = await database.query(
+      `
+        insert into xero_send_attempts (
+          quote_preview_id, document_type, idempotency_key, expected_version, state,
+          attempt_count, requested_by, request_summary, started_at, last_attempt_at, last_error
+        ) values ($1, $2, $3, $4, 'sending', 1, $5, $6, clock_timestamp(), clock_timestamp(), '')
+        on conflict (idempotency_key) do update set
+          state = 'sending',
+          expected_version = excluded.expected_version,
+          requested_by = excluded.requested_by,
+          attempt_count = xero_send_attempts.attempt_count + 1,
+          request_summary = excluded.request_summary,
+          last_attempt_at = clock_timestamp(),
+          last_error = '',
+          updated_at = now()
+        returning id
+      `,
+      [id, documentType, idempotencyKey, access.expectedVersion, access.userId, JSON.stringify({ amount, documentNumber: previewRow.quoteNumber, lineCount: xeroLineItems.length })]
+    );
+    sendAttemptId = attemptResult.rows[0].id;
+    await database.query(
+      `update quote_previews set send_state = 'sending', active_send_attempt_id = $2, updated_at = now() where id = $1`,
+      [id, sendAttemptId]
+    );
+
     await database.query("commit");
     transactionOpen = false;
 
-    const xeroTransport = await sendQuoteRequestToXero(xeroPreparedRequest);
+    let xeroTransport;
+    try {
+      xeroTransport = internal.knownTransport || await sendQuoteRequestToXero(xeroPreparedRequest);
+      xeroRequestReturned = true;
+    } catch (error) {
+      const unknown = ambiguousXeroError(error);
+      const nextState = unknown ? "unknown" : "failed";
+      await database.query("begin");
+      transactionOpen = true;
+      await database.query(
+        `update xero_send_attempts set state = $2, last_error = $3, updated_at = now(), completed_at = case when $2 = 'failed' then clock_timestamp() else null end where id = $1`,
+        [sendAttemptId, nextState, safeSendError(error)]
+      );
+      await database.query(
+        `update quote_previews set send_state = $2, updated_at = now() where id = $1 and active_send_attempt_id = $3`,
+        [id, nextState, sendAttemptId]
+      );
+      await database.query("commit");
+      transactionOpen = false;
+      if (unknown) {
+        await openAlertIncident({
+          dedupeKey: `xero-send-unknown:${id}`,
+          component: "xero_status",
+          severity: "critical",
+          summary: `Xero send result is unknown for document ${previewRow.quoteNumber || id}`,
+          details: { attemptId: sendAttemptId, previewId: id }
+        }).catch(() => undefined);
+        throw draftError(
+          "Xero may have received this document, but the response was lost. Use Reconcile before retrying.",
+          409,
+          "XERO_SEND_UNKNOWN",
+          { attemptId: sendAttemptId, sendState: "unknown" }
+        );
+      }
+      throw error;
+    }
 
     await database.query("begin");
     transactionOpen = true;
@@ -2803,6 +2977,21 @@ export async function sendQuotePreviewToXero(id, input = {}, actor = {}) {
     const xeroDocumentId = sendMode === "live" ? xeroDocumentIdentifier(xeroTransport) : "";
     const xeroQuoteId = sendMode === "live" ? xeroTransport.quoteId || "" : "";
     const xeroResponse = sendMode === "live" ? xeroTransport.payload : xeroPreparedResponse(documentLabel);
+
+    await database.query(
+      `
+        update xero_send_attempts
+        set state = 'succeeded',
+            xero_document_id = $2,
+            xero_quote_id = $3,
+            response_summary = $4,
+            last_error = '',
+            completed_at = clock_timestamp(),
+            updated_at = now()
+        where id = $1
+      `,
+      [sendAttemptId, xeroDocumentId, xeroQuoteId, JSON.stringify({ mode: sendMode, status: quoteStatus })]
+    );
 
     const xeroQuoteResult = await database.query(
       `
@@ -2895,6 +3084,7 @@ export async function sendQuotePreviewToXero(id, input = {}, actor = {}) {
         update quote_previews
         set status = $2,
             document_type = $3,
+            send_state = 'succeeded',
             last_edited_by = $4,
             editing_by = null,
             editing_session_id = null,
@@ -2908,12 +3098,14 @@ export async function sendQuotePreviewToXero(id, input = {}, actor = {}) {
 
     await database.query("commit");
     transactionOpen = false;
+    await resolveAlertIncident(`xero-send-unknown:${id}`).catch(() => undefined);
 
     return {
       preview: {
         id,
         status: previewStatus,
-        version: Number(previewRow.version) + 1
+        version: Number(previewRow.version) + 1,
+        xeroSendState: "succeeded"
       },
       xero: {
         amount,
@@ -2936,6 +3128,20 @@ export async function sendQuotePreviewToXero(id, input = {}, actor = {}) {
     };
   } catch (error) {
     if (transactionOpen) await database.query("rollback");
+    if (sendAttemptId && xeroRequestReturned) {
+      try {
+        await database.query(
+          `update xero_send_attempts set state = 'unknown', last_error = $2, updated_at = now() where id = $1 and state in ('pending', 'sending')`,
+          [sendAttemptId, safeSendError(error)]
+        );
+        await database.query(
+          `update quote_previews set send_state = 'unknown', updated_at = now() where id = $1 and active_send_attempt_id = $2 and send_state = 'sending'`,
+          [id, sendAttemptId]
+        );
+      } catch {
+        // The persisted sending attempt remains available for the monitor to reconcile.
+      }
+    }
     throw error;
   } finally {
     try {
@@ -2943,5 +3149,184 @@ export async function sendQuotePreviewToXero(id, input = {}, actor = {}) {
     } finally {
       database.release();
     }
+  }
+}
+
+export async function reconcileQuotePreviewXeroSend(id, input = {}, actor = {}) {
+  const pool = getDatabasePool();
+  if (!pool) throw draftError("DATABASE_URL is not configured.", 503, "DATABASE_NOT_CONFIGURED");
+  const database = await pool.connect();
+  let row;
+  let access;
+  try {
+    await database.query("begin");
+    await acquireDraftTransactionLock(database, id);
+    const result = await database.query(
+      `
+        select
+          preview.id,
+          preview.status,
+          preview.version::int as version,
+          preview.archived_at as "archivedAt",
+          preview.editing_by as "editingBy",
+          preview.editing_session_id::text as "editingSessionId",
+          preview.editing_expires_at as "editingExpiresAt",
+          editor.display_name as "editingByName",
+          preview.quote_number as "quoteNumber",
+          preview.document_type as "documentType",
+          preview.send_state as "sendState",
+          attempt.id as "attemptId",
+          attempt.state as "attemptState",
+          attempt.last_attempt_at as "lastAttemptAt"
+        from quote_previews preview
+        left join app_users editor on editor.id = preview.editing_by
+        left join xero_send_attempts attempt on attempt.id = preview.active_send_attempt_id
+        where preview.id = $1
+        for update of preview
+      `,
+      [id]
+    );
+    if (!result.rowCount) throw draftError("Draft not found.", 404, "DRAFT_NOT_FOUND");
+    row = result.rows[0];
+    if (row.status !== "preview") throw draftError("This document has already been sent.", 409, "DRAFT_NOT_EDITABLE");
+    if (!row.attemptId || !["unknown", "sending"].includes(row.attemptState)) {
+      throw draftError("This draft does not have an unresolved Xero send.", 409, "XERO_SEND_NOT_UNRESOLVED");
+    }
+    if (row.attemptState === "sending" && Date.now() - new Date(row.lastAttemptAt).getTime() < 10 * 60 * 1000) {
+      throw draftError("The Xero send is still in progress. Wait before reconciling it.", 409, "XERO_SEND_IN_PROGRESS");
+    }
+    access = assertDraftMutation({ ...row, sendState: "failed" }, input, actor);
+    await database.query("commit");
+  } catch (error) {
+    await database.query("rollback").catch(() => undefined);
+    throw error;
+  } finally {
+    database.release();
+  }
+
+  const lookup = await findXeroDocumentByNumber({
+    documentNumber: row.quoteNumber,
+    documentType: row.documentType
+  });
+  if (lookup.mode !== "live") {
+    throw draftError("Reconnect Xero before reconciling this send.", 409, "XERO_NOT_CONNECTED");
+  }
+
+  await pool.query(
+    `
+      update xero_send_attempts
+      set state = 'failed',
+          last_error = $2,
+          completed_at = case when $3::boolean then null else clock_timestamp() end,
+          updated_at = now()
+      where id = $1 and state in ('unknown', 'sending')
+    `,
+    [row.attemptId, lookup.document ? "Remote document found; finalizing the local send record." : "No matching Xero document was found; the draft may be retried.", Boolean(lookup.document)]
+  );
+  await pool.query(
+    `update quote_previews set send_state = 'failed', updated_at = now() where id = $1 and active_send_attempt_id = $2`,
+    [id, row.attemptId]
+  );
+
+  if (!lookup.document) {
+    await resolveAlertIncident(`xero-send-unknown:${id}`).catch(() => undefined);
+    return {
+      preview: { id, status: "preview", version: Number(row.version), xeroSendState: "failed" },
+      xero: { state: "not_found", canRetry: true, message: "No matching Xero document was found. The draft is unlocked for a safe retry." }
+    };
+  }
+
+  return sendQuotePreviewToXero(id, {
+    editorSessionId: access.editorSessionId,
+    version: access.expectedVersion,
+    documentType: row.documentType
+  }, actor, { knownTransport: xeroTransportFromLookup(lookup, row.documentType) });
+}
+
+export async function reconcileStaleXeroSendAttempts({ limit = 20 } = {}) {
+  const pool = getDatabasePool();
+  if (!pool) throw draftError("DATABASE_URL is not configured.", 503, "DATABASE_NOT_CONFIGURED");
+  const lockClient = await pool.connect();
+  let jobLockHeld = false;
+  const outcomes = [];
+  try {
+    const lockResult = await lockClient.query(
+      "select pg_try_advisory_lock(hashtextextended('xero-send-reconciliation', 0)) as acquired"
+    );
+    jobLockHeld = Boolean(lockResult.rows[0]?.acquired);
+    if (!jobLockHeld) return { inProgress: true, checked: 0, outcomes: [] };
+
+    const result = await lockClient.query(
+      `
+        select
+          preview.id,
+          preview.version::int as version,
+          coalesce(attempt.requested_by, preview.last_edited_by, preview.created_by, admin_user.id) as "userId"
+        from xero_send_attempts attempt
+        join quote_previews preview on preview.id = attempt.quote_preview_id
+        left join lateral (
+          select app_users.id
+          from app_users
+          join app_user_roles on app_user_roles.user_id = app_users.id
+          join app_roles on app_roles.id = app_user_roles.role_id and app_roles.name = 'admin'
+          where app_users.status = 'active'
+          order by app_users.created_at, app_users.id
+          limit 1
+        ) admin_user on true
+        where attempt.state in ('sending', 'unknown')
+          and attempt.last_attempt_at < now() - interval '10 minutes'
+          and preview.status = 'preview'
+          and preview.send_state in ('sending', 'unknown')
+        order by attempt.last_attempt_at, attempt.id
+        limit $1
+      `,
+      [Math.max(1, Math.min(Number(limit) || 20, 100))]
+    );
+
+    for (const row of result.rows) {
+      if (!row.userId) {
+        outcomes.push({ id: row.id, status: "failed", message: "No active user is available for reconciliation." });
+        continue;
+      }
+      const editorSessionId = crypto.randomUUID();
+      try {
+        await pool.query(
+          `
+            update quote_previews
+            set editing_by = $2,
+                editing_session_id = $3,
+                editing_expires_at = now() + interval '10 minutes'
+            where id = $1 and status = 'preview' and send_state in ('sending', 'unknown')
+          `,
+          [row.id, row.userId, editorSessionId]
+        );
+        const payload = await reconcileQuotePreviewXeroSend(row.id, {
+          editorSessionId,
+          version: Number(row.version)
+        }, { userId: row.userId, name: "Scheduled Xero reconciliation" });
+        outcomes.push({ id: row.id, status: "complete", state: payload.xero?.state || payload.preview?.xeroSendState || "complete" });
+      } catch (error) {
+        outcomes.push({ id: row.id, status: "failed", message: safeSendError(error) });
+        await openAlertIncident({
+          dedupeKey: `xero-send-unknown:${row.id}`,
+          component: "xero_status",
+          severity: "critical",
+          summary: `Scheduled Xero reconciliation failed for draft ${row.id}`,
+          details: { previewId: row.id }
+        }).catch(() => undefined);
+      } finally {
+        await pool.query(
+          `update quote_previews set editing_by = null, editing_session_id = null, editing_expires_at = null where id = $1 and editing_session_id = $2`,
+          [row.id, editorSessionId]
+        ).catch(() => undefined);
+      }
+    }
+
+    return { inProgress: false, checked: result.rowCount, outcomes };
+  } finally {
+    if (jobLockHeld) {
+      await lockClient.query("select pg_advisory_unlock(hashtextextended('xero-send-reconciliation', 0))").catch(() => undefined);
+    }
+    lockClient.release();
   }
 }

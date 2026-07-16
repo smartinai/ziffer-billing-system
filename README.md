@@ -4,7 +4,7 @@ Local reporting dashboard for stored Teamwork time entries, internal people, pro
 
 ## Local Setup
 
-1. Install Node.js 18 or newer.
+1. Install Node.js 22 LTS.
 2. Clone the private GitHub repository.
 3. Install dependencies:
 
@@ -61,6 +61,8 @@ For HTTPS deployments, cookies are marked secure by default. Keep `COOKIE_SECURE
 
 For VPS deployment, use [docs/VPS_DEPLOYMENT_SECURITY.md](docs/VPS_DEPLOYMENT_SECURITY.md) and copy `production.env.example` to `.env` on the server.
 
+Production monitoring, encrypted off-site backups, restore drills, approved deployments, and rollbacks are documented in [docs/OPERATIONS_RUNBOOK.md](docs/OPERATIONS_RUNBOOK.md).
+
 ## Data Handling
 
 - `.env` is local only and must not be committed.
@@ -72,18 +74,11 @@ For VPS deployment, use [docs/VPS_DEPLOYMENT_SECURITY.md](docs/VPS_DEPLOYMENT_SE
 ## Checks
 
 ```bash
-npm test
-npm run build
-npm run test:visual
+npm run check
+npm run db:seed-e2e
+npm run test:e2e
 ```
 
-## Production Backups
+## Production Safety
 
-With the production Docker Compose stack running:
-
-```bash
-npm run db:production:backup
-npm run db:production:restore -- backups/<backup-file>.dump --yes
-```
-
-See [docs/VPS_DEPLOYMENT_SECURITY.md](docs/VPS_DEPLOYMENT_SECURITY.md) before restoring production data.
+Production changes use the approval-protected GitHub deployment workflow. Daily backups are validated, encrypted with Restic, and uploaded to restricted Infomaniak Object Storage; weekly drills restore the newest off-site snapshot into an isolated PostgreSQL 17 container. Do not use the local restore command as a normal application rollback mechanism.

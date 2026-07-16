@@ -1,0 +1,64 @@
+name: Deploy production
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit, tag, or branch to deploy
+        required: true
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ziffer-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npx playwright install --with-deps chromium
+      - id: release
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Configure production SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/ziffer_deploy
+          chmod 600 ~/.ssh/ziffer_deploy
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+      - name: Deploy approved commit
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+        run: ssh -i ~/.ssh/ziffer_deploy "$VPS_USER@$VPS_HOST" "sudo sh /opt/ziffer-billing-v2/ops/deploy.sh '$RELEASE_SHA'"
+      - id: smoke
+        name: Browser smoke production
+        continue-on-error: true
+        env:
+          PRODUCTION_SMOKE_URL: https://app.ziffer.lu
+        run: npx playwright test --config=playwright.production.config.js
+      - name: Roll back failed browser smoke
+        if: steps.smoke.outcome == 'failure'
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: ssh -i ~/.ssh/ziffer_deploy "$VPS_USER@$VPS_HOST" "sudo sh /opt/ziffer-billing-v2/ops/rollback-last.sh"
+      - name: Fail release after rollback
+        if: steps.smoke.outcome == 'failure'
+        run: exit 1

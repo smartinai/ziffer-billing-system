@@ -1,0 +1,15 @@
+# Copy to /etc/msmtprc, set owner root:root and mode 600.
+defaults
+auth on
+tls on
+tls_starttls on
+logfile /var/log/msmtp.log
+
+account ziffer
+host smtp.example.invalid
+port 587
+from alerts@ziffer.lu
+user alerts@ziffer.lu
+password replace-with-infomaniak-mailbox-password
+
+account default : ziffer

@@ -11,6 +11,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, "..");
 const migrationsDir = path.join(projectRoot, "migrations");
 const dryRun = process.argv.includes("--dry-run");
+const throughMigration = process.argv.find((argument) => argument.startsWith("--through="))?.slice("--through=".length) || "";
 
 async function listMigrationFiles() {
   const files = await fs.readdir(migrationsDir);
@@ -62,7 +63,13 @@ async function runMigration(client, file) {
 }
 
 async function main() {
-  const files = await listMigrationFiles();
+  const allFiles = await listMigrationFiles();
+  const files = throughMigration
+    ? allFiles.filter((file) => migrationId(file) <= throughMigration)
+    : allFiles;
+  if (throughMigration && !allFiles.some((file) => migrationId(file) === throughMigration)) {
+    throw new Error(`Migration ${throughMigration} was not found.`);
+  }
 
   if (dryRun) {
     console.log(`Found ${files.length} migration(s):`);

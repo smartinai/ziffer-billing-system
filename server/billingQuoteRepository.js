@@ -1,5 +1,6 @@
 import { getDatabasePool } from "./db.js";
 import { fetchXeroDocumentStatus } from "./xeroClient.js";
+import { openAlertIncident, recordOperationRun, resolveAlertIncident } from "./operationsRepository.js";
 
 function money(value) {
   return Number(value || 0);
@@ -525,13 +526,41 @@ export async function syncXeroDocumentStatuses(input = {}) {
     }
   }
 
-  return {
+  const summary = {
     connected: skipped < result.rows.length,
     failed,
     skipped,
     synced,
     total: result.rows.length
   };
+
+  await recordOperationRun({
+    operationType: "xero_status",
+    trigger: quoteId ? "manual" : "scheduled",
+    status: failed ? (failed === result.rows.length && result.rows.length ? "failed" : "warning") : "complete",
+    finishedAt: new Date(),
+    errorMessage: failed ? `${failed} Xero document status update(s) failed.` : "",
+    metadata: summary
+  }).catch(() => undefined);
+
+  if (!failed) {
+    await resolveAlertIncident("xero-status-poller").catch(() => undefined);
+  } else if (!quoteId) {
+    const recent = await pool.query(
+      `select status from operation_runs where operation_type = 'xero_status' and trigger = 'scheduled' order by started_at desc limit 3`
+    ).catch(() => ({ rows: [] }));
+    if (recent.rows.length === 3 && recent.rows.every((row) => row.status !== "complete")) {
+      await openAlertIncident({
+        dedupeKey: "xero-status-poller",
+        component: "xero_status",
+        severity: "warning",
+        summary: "Three consecutive Xero status polling cycles failed",
+        details: { failed, total: result.rows.length }
+      }).catch(() => undefined);
+    }
+  }
+
+  return summary;
 }
 
 let xeroStatusPoller = null;
@@ -542,6 +571,19 @@ export function startXeroStatusPoller({ intervalMs = 60 * 60 * 1000 } = {}) {
   xeroStatusPoller = setInterval(() => {
     syncXeroDocumentStatuses().catch((error) => {
       console.error(`Xero status sync failed: ${error.message}`);
+      recordOperationRun({
+        operationType: "xero_status",
+        trigger: "scheduled",
+        status: "failed",
+        finishedAt: new Date(),
+        errorMessage: error.message
+      }).catch(() => undefined);
+      openAlertIncident({
+        dedupeKey: "xero-status-poller",
+        component: "xero_status",
+        severity: "critical",
+        summary: "Xero connection or token refresh failed"
+      }).catch(() => undefined);
     });
   }, intervalMs);
   xeroStatusPoller.unref?.();

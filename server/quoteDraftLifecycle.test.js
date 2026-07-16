@@ -123,3 +123,35 @@ test("unrelated unique violations are not rewritten as document conflicts", () =
   const error = { code: "23505", constraint: "xero_quotes_idempotency_key_key" };
   assert.equal(quoteDraftTestHooks.mapDocumentNumberConflict(error), error);
 });
+
+test("Xero retries keep one stable idempotency key per draft and document type", () => {
+  const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  assert.equal(
+    quoteDraftTestHooks.xeroIdempotencyKey(id, "draft_invoice"),
+    quoteDraftTestHooks.xeroIdempotencyKey(id, "draft_invoice")
+  );
+  assert.notEqual(
+    quoteDraftTestHooks.xeroIdempotencyKey(id, "draft_invoice"),
+    quoteDraftTestHooks.xeroIdempotencyKey(id, "draft_quote")
+  );
+});
+
+test("network and server failures are treated as ambiguous Xero outcomes", () => {
+  assert.equal(quoteDraftTestHooks.ambiguousXeroError(new TypeError("fetch failed")), true);
+  assert.equal(quoteDraftTestHooks.ambiguousXeroError({ statusCode: 503 }), true);
+  assert.equal(quoteDraftTestHooks.ambiguousXeroError({ statusCode: 400 }), false);
+});
+
+test("a remotely reconciled Xero document finalizes locally without another send", () => {
+  const transport = quoteDraftTestHooks.xeroTransportFromLookup({
+    document: { InvoiceID: "invoice-123", InvoiceNumber: "INV-123", Status: "DRAFT" },
+    tenantId: "demo-tenant",
+    tenantName: "Demo Company"
+  }, "draft_invoice");
+
+  assert.equal(transport.mode, "live");
+  assert.equal(transport.documentId, "invoice-123");
+  assert.equal(transport.invoiceId, "invoice-123");
+  assert.equal(transport.xeroStatus, "DRAFT");
+  assert.equal(transport.reconciled, true);
+});

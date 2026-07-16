@@ -238,6 +238,18 @@ export function createQuotePreview(input) {
   });
 }
 
+export function getOperations() {
+  if (demoMode) {
+    return Promise.resolve({ checkedAt: new Date().toISOString(), components: [], incidents: [], recentRuns: [], emailConfigured: false });
+  }
+  return request("/api/admin/operations");
+}
+
+export function sendOperationsTestAlert() {
+  if (demoMode) return Promise.resolve({ ok: true, recipientCount: 0 });
+  return request("/api/admin/operations/test-alert", { method: "POST" });
+}
+
 export function getQuoteDrafts(editorSessionId = "") {
   if (demoMode) return Promise.resolve({ archived: [], drafts: [] });
   const params = new URLSearchParams();
@@ -330,6 +342,19 @@ export function sendQuoteToXero(previewId, input = {}) {
     });
   }
   return request(`/api/billing/quote-previews/${previewId}/send-to-xero`, {
+    body: JSON.stringify(input),
+    method: "POST"
+  });
+}
+
+export function reconcileQuoteXeroSend(previewId, input = {}) {
+  if (demoMode) {
+    return Promise.resolve({
+      preview: { id: previewId, status: "preview", xeroSendState: "failed" },
+      xero: { state: "not_found", canRetry: true, message: "No demo Xero document was found." }
+    });
+  }
+  return request(`/api/billing/quote-previews/${previewId}/reconcile-xero-send`, {
     body: JSON.stringify(input),
     method: "POST"
   });

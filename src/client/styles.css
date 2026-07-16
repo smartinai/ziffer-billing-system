@@ -207,6 +207,12 @@ button {
   color: #141414;
 }
 
+.side-rail > div:first-child {
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
 .brand-block {
   display: flex;
   align-items: center;
@@ -352,6 +358,7 @@ button {
 }
 
 .rail-footer {
+  flex: 0 0 auto;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
@@ -2044,6 +2051,94 @@ td strong {
   min-height: 420px;
 }
 
+.operations-summary-panel,
+.operations-incidents-panel,
+.operations-runs-panel {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+}
+
+.operations-incidents-panel .table-scroll,
+.operations-runs-panel .table-scroll {
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  width: 100%;
+}
+
+.operations-incidents-panel .quotes-table,
+.operations-runs-panel .quotes-table {
+  min-width: 900px;
+  width: 100%;
+}
+
+.operations-heading {
+  align-items: flex-start;
+  display: flex;
+  gap: 24px;
+  justify-content: space-between;
+}
+
+.operations-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.operations-actions button {
+  align-items: center;
+  display: inline-flex;
+  gap: 8px;
+}
+
+.operations-card-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.operations-card {
+  background: #fbfaf7;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 16px;
+}
+
+.operations-card p,
+.operations-card strong {
+  margin: 0;
+}
+
+.operations-card-title {
+  align-items: center;
+  display: flex;
+  font-weight: 700;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.warning-banner,
+.success-banner {
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.warning-banner {
+  background: #fff6df;
+  border: 1px solid #e9c779;
+  color: #765612;
+}
+
+.success-banner {
+  background: #e9f7f1;
+  border: 1px solid #a8d8c3;
+  color: #245f4d;
+}
+
 .draft-save-state {
   color: #66706d;
   font-size: 12px;
@@ -2987,6 +3082,10 @@ td strong {
     flex-direction: row;
     align-items: center;
     padding: 16px;
+  }
+
+  .side-rail > div:first-child {
+    overflow: visible;
   }
 
   .main-surface {

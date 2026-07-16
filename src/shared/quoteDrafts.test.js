@@ -555,6 +555,43 @@ test("splits the next annual-service entry when only part of it fits the prepaid
   assert.equal(preview.totals.includedHours, 0.18);
 });
 
+test("reconciles a 0.25h VAT entry into 0.10h prepaid and 0.15h invoiceable", () => {
+  const preview = buildAggregatedQuotePreview({
+    annualUsage: [{
+      annualHours: 0.1,
+      serviceId: "service-vat",
+      usageId: "annual-vat-2026",
+      usedHours: 0,
+      year: 2026
+    }],
+    billingClient: { ...billingClient, discount: 0 },
+    entries: [{
+      date: "2026-01-15",
+      description: "VAT filing",
+      hours: 0.25,
+      id: "entry-vat",
+      isBillable: true,
+      taskId: "task-vat-2026",
+      taskName: "VAT / Value added tax 2026",
+      userName: "Ada",
+      userRate: 300
+    }],
+    periodEnd: "2026-01-31",
+    periodStart: "2026-01-01",
+    services
+  });
+
+  const prepaid = preview.lines.find((line) => line.annualCovered);
+  const invoiceable = preview.lines.find((line) => !line.annualCovered && line.serviceKey === "value_added_tax");
+  assert.equal(prepaid.quantityHours, 0.1);
+  assert.equal(invoiceable.quantityHours, 0.15);
+  assert.equal(invoiceable.amount, 45);
+  assert.equal(preview.totals.annualCoveredHours, 0.1);
+  assert.equal(preview.totals.includedHours, 0.15);
+  assert.equal(preview.totals.totalHours, 0.25);
+  assert.equal(preview.totals.annualCoveredHours + preview.totals.includedHours, preview.totals.totalHours);
+});
+
 test("does not annual-cover services when annual hours are blank", () => {
   const preview = buildAggregatedQuotePreview({
     annualUsage: [

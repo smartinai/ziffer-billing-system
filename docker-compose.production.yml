@@ -15,6 +15,7 @@ services:
       retries: 10
 
   app:
+    image: ${APP_IMAGE:-ziffer-billing-v2-app:local}
     build:
       context: .
       dockerfile: Dockerfile
@@ -34,12 +35,19 @@ services:
       - app-data:/app/data
     expose:
       - "3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
     depends_on:
-      - app
+      app:
+        condition: service_healthy
     ports:
       - "80:80"
       - "443:443"

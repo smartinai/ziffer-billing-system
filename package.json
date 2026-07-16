@@ -18,11 +18,15 @@
     "db:production:backup": "node scripts/backup-production-db.mjs",
     "db:production:restore": "node scripts/restore-production-db.mjs",
     "db:seed-mock-quotes": "node scripts/seed-mock-quotes.mjs",
+    "db:seed-e2e": "node scripts/seed-e2e.mjs",
+    "db:clean-e2e": "node scripts/clean-e2e.mjs",
+    "lint": "eslint .",
     "sync:teamwork:scheduled": "node scripts/sync-teamwork-scheduled.mjs",
     "start": "node server/index.js",
     "test": "node --test",
+    "test:e2e": "playwright test",
     "test:visual": "node scripts/visual-check.mjs",
-    "check": "npm run test && npm run build"
+    "check": "npm run lint && npm run test && npm run build"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",
@@ -30,13 +34,16 @@
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "lucide-react": "^0.468.0",
+    "nodemailer": "^9.0.3",
     "pg": "^8.22.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "recharts": "^2.13.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.0",
     "concurrently": "^9.2.3",
+    "eslint": "^9.32.0",
     "playwright": "^1.61.0",
     "read-excel-file": "^9.2.0",
     "vite": "^6.0.3"

@@ -645,6 +645,28 @@ export async function fetchXeroDocumentStatus({ documentId, documentType }) {
   };
 }
 
+export async function findXeroDocumentByNumber({ documentNumber, documentType }) {
+  const number = String(documentNumber || "").trim();
+  if (!number) {
+    const error = new Error("A Xero document number is required for reconciliation.");
+    error.statusCode = 400;
+    throw error;
+  }
+  const isInvoice = documentType === "draft_invoice";
+  const collectionKey = isInvoice ? "Invoices" : "Quotes";
+  const field = isInvoice ? "InvoiceNumber" : "QuoteNumber";
+  const escaped = number.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const transport = await fetchXeroCollection({
+    collectionKey,
+    endpoint: isInvoice ? "/Invoices" : "/Quotes",
+    params: { where: `${field}=="${escaped}"` }
+  });
+  return {
+    ...transport,
+    document: transport.mode === "live" ? transport.items?.[0] || null : null
+  };
+}
+
 export async function disconnectXero() {
   const pool = requireDatabase();
   await pool.query(

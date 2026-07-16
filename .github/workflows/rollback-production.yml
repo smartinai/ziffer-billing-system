@@ -1,0 +1,36 @@
+name: Roll back production
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Retained commit image to restore
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ziffer-production
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Configure production SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/ziffer_deploy
+          chmod 600 ~/.ssh/ziffer_deploy
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+      - name: Roll back application image
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          TARGET_SHA: ${{ inputs.commit_sha }}
+        run: ssh -i ~/.ssh/ziffer_deploy "$VPS_USER@$VPS_HOST" "sudo sh /opt/ziffer-billing-v2/ops/rollback.sh '$TARGET_SHA'"

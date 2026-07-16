@@ -5,8 +5,11 @@ dist/
 data/*.json
 backups/
 qa-screenshots/
+playwright-report/
+test-results/
 .env
 .env.local
+.deploy.env
 npm-debug.log*
 *.log
 .DS_Store

@@ -16,6 +16,7 @@ import {
   getArchivedQuoteDraft,
   listQuoteDrafts,
   releaseQuoteDraftLocksForSession,
+  reconcileQuotePreviewXeroSend,
   renewQuoteDraftLock,
   restoreQuoteDraft,
   sendQuotePreviewToXero,
@@ -23,6 +24,7 @@ import {
   updateQuotePreviewTimeEntryBillable
 } from "./quotePreviewRepository.js";
 import { getReportingSummary, getSourceStatus, refreshStoredReportingSummary } from "./reportingService.js";
+import { operationsRouter } from "./routes/operationsRoutes.js";
 import { securityHeaders } from "./securityHeaders.js";
 import {
   buildXeroAuthorizationUrl,
@@ -44,14 +46,19 @@ app.use(securityHeaders({ isProduction: config.isProduction }));
 app.use(express.json({ limit: "2mb" }));
 app.use(cookieParser());
 
-app.get("/api/health", (_req, res) => {
+function liveHealth(_req, res) {
   res.json({ ok: true, service: "ziffer-reporting" });
-});
+}
 
-app.get("/api/health/db", async (_req, res) => {
+async function readyHealth(_req, res) {
   const status = await checkDatabase();
   res.status(status.ok ? 200 : 503).json(status);
-});
+}
+
+app.get("/api/health", liveHealth);
+app.get("/api/health/live", liveHealth);
+app.get("/api/health/db", readyHealth);
+app.get("/api/health/ready", readyHealth);
 
 app.get("/api/auth/session", sessionHandler);
 app.get("/api/auth/csrf", requireAuth, csrfTokenHandler);
@@ -65,6 +72,8 @@ app.post("/api/auth/logout", requireAuth, requireCsrf, async (req, res, next) =>
   }
 });
 app.patch("/api/auth/account", requireAuth, requireCsrf, updateAccountHandler);
+
+app.use("/api/admin/operations", operationsRouter);
 
 function parseDateRange(req, res) {
   const startDate = String(req.query.startDate || config.defaultStartDate);
@@ -368,6 +377,25 @@ app.post("/api/billing/quote-previews/:id/send-to-xero", requireAuth, requireCsr
         status: payload.xero?.status,
         sentAmount: payload.preview?.amount,
         summary: `Sent ${payload.xero?.documentLabel || "document"} ${payload.preview?.quoteNumber || ""} to Xero for ${payload.preview?.billingClient?.displayName || "client"} (${payload.preview?.amount ?? 0} EUR)`.trim()
+      }
+    });
+    res.json(payload);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/billing/quote-previews/:id/reconcile-xero-send", requireAuth, requireCsrf, async (req, res, next) => {
+  try {
+    const payload = await reconcileQuotePreviewXeroSend(req.params.id, req.body || {}, req.user);
+    await recordAuditEvent({
+      action: "xero_send_reconcile",
+      actor: req.user,
+      entityId: req.params.id,
+      entityType: "quote_preview",
+      metadata: {
+        state: payload.preview?.xeroSendState || payload.xero?.state,
+        summary: `Reconciled Xero send for ${req.params.id}`
       }
     });
     res.json(payload);

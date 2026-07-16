@@ -1,0 +1,35 @@
+name: Xero demo integration
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type XERO-DEMO to confirm this is the isolated demo tenant
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify-demo:
+    if: inputs.confirmation == 'XERO-DEMO'
+    runs-on: ubuntu-latest
+    environment: xero-demo
+    env:
+      DATABASE_URL: ${{ secrets.XERO_DEMO_DATABASE_URL }}
+      DATABASE_SSL: "true"
+      XERO_CLIENT_ID: ${{ secrets.XERO_DEMO_CLIENT_ID }}
+      XERO_CLIENT_SECRET: ${{ secrets.XERO_DEMO_CLIENT_SECRET }}
+      XERO_REDIRECT_URI: ${{ secrets.XERO_DEMO_REDIRECT_URI }}
+      XERO_RETURN_URL: ${{ secrets.XERO_DEMO_RETURN_URL }}
+      XERO_TOKEN_ENCRYPTION_KEY: ${{ secrets.XERO_DEMO_TOKEN_ENCRYPTION_KEY }}
+      XERO_DEMO_TENANT_ID: ${{ secrets.XERO_DEMO_TENANT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Verify isolated Xero demo transport
+        run: node scripts/check-xero-demo.mjs

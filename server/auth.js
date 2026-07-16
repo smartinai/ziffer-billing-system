@@ -175,6 +175,16 @@ export function requireAuth(req, res, next) {
   next();
 }
 
+export function requireRole(role) {
+  return (req, res, next) => {
+    if (!req.user) return res.status(401).json({ message: "Authentication required." });
+    if (!Array.isArray(req.user.roles) || !req.user.roles.includes(role)) {
+      return res.status(403).json({ code: "ROLE_REQUIRED", message: "Administrator access is required." });
+    }
+    next();
+  };
+}
+
 export function csrfTokenHandler(req, res) {
   const sessionToken = req.cookies?.[COOKIE_NAME];
   if (!readToken(sessionToken)) return res.status(401).json({ message: "Authentication required." });
