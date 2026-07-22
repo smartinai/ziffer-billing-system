@@ -11,6 +11,8 @@
 
 The app, PostgreSQL 17, and Caddy run through `docker-compose.production.yml`. A complete VPS or provider outage is not externally monitored by current product decision.
 
+Encrypted off-site backups, restore drills, and alert delivery are currently deferred in [plan.md](../plan.md). Approved deployments still create a checksum-validated local backup before running migration preflight.
+
 ## Initial host activation
 
 1. Install `restic`, `msmtp`, `flock`, `curl`, Docker, and the Docker Compose plugin.

@@ -46,7 +46,7 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           RELEASE_SHA: ${{ steps.release.outputs.sha }}
-        run: ssh -i ~/.ssh/ziffer_deploy "$VPS_USER@$VPS_HOST" "sudo sh /opt/ziffer-billing-v2/ops/deploy.sh '$RELEASE_SHA'"
+        run: ssh -i ~/.ssh/ziffer_deploy "$VPS_USER@$VPS_HOST" "BACKUP_DIR=/opt/ziffer-billing-v2/backups/daily STATE_DIR=/opt/ziffer-billing-v2/.state sh /opt/ziffer-billing-v2/ops/deploy.sh '$RELEASE_SHA'"
       - id: smoke
         name: Browser smoke production
         continue-on-error: true
@@ -58,7 +58,7 @@ jobs:
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
-        run: ssh -i ~/.ssh/ziffer_deploy "$VPS_USER@$VPS_HOST" "sudo sh /opt/ziffer-billing-v2/ops/rollback-last.sh"
+        run: ssh -i ~/.ssh/ziffer_deploy "$VPS_USER@$VPS_HOST" "STATE_DIR=/opt/ziffer-billing-v2/.state sh /opt/ziffer-billing-v2/ops/rollback-last.sh"
       - name: Fail release after rollback
         if: steps.smoke.outcome == 'failure'
         run: exit 1

@@ -81,4 +81,4 @@ npm run test:e2e
 
 ## Production Safety
 
-Production changes use the approval-protected GitHub deployment workflow. Daily backups are validated, encrypted with Restic, and uploaded to restricted Infomaniak Object Storage; weekly drills restore the newest off-site snapshot into an isolated PostgreSQL 17 container. Do not use the local restore command as a normal application rollback mechanism.
+Production changes use the GitHub deployment workflow, which creates and validates a local database backup before migrations. Encrypted off-site backups, restore drills, and alert delivery are documented for later activation in [plan.md](plan.md). Do not use the local restore command as a normal application rollback mechanism.
