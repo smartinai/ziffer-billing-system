@@ -21,7 +21,7 @@ import {
   UserRound,
   UsersRound
 } from "lucide-react";
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -49,6 +49,7 @@ import {
   login,
   logout,
   refreshSummary,
+  reconcileQuoteXeroSend,
   renewQuoteDraft,
   restoreQuoteDraft,
   sendQuoteToXero,
@@ -61,6 +62,8 @@ import {
   updateQuoteTimeEntryBillable
 } from "./api.js";
 import { getBillingClients, getXeroReference, updateBillingClient } from "./api.js";
+
+const OperationsView = lazy(() => import("./OperationsView.jsx"));
 
 const reportingTabs = [
   { id: "reporting-overview", label: "Overview", icon: BarChart3 },
@@ -103,7 +106,8 @@ const billingTabs = [
   { id: "billing-quotes", label: "Docs", icon: FileText },
   { id: "billing-annual-invoices", label: "Annual Invoices", icon: CalendarDays },
   { id: "billing-clients", label: "Clients", icon: BriefcaseBusiness },
-  { id: "billing-audit-log", label: "Audit Log", icon: ShieldCheck }
+  { id: "billing-audit-log", label: "Audit Log", icon: ShieldCheck },
+  { id: "billing-operations", label: "Operations", icon: Activity, adminOnly: true }
 ];
 
 const allTabs = [...reportingTabs, ...billingTabs];
@@ -957,6 +961,7 @@ function titleForTab(tab) {
     "billing-annual-invoices": "Annual Invoices",
     "billing-audit-log": "Audit Log",
     "billing-clients": "Clients",
+    "billing-operations": "Operations",
     "billing-create-quote": "Create New",
     "billing-quotes": "Docs",
     "reporting-overview": "Overview",
@@ -2694,6 +2699,7 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
   const [editingLine, setEditingLine] = useState(null);
   const [addingManualLine, setAddingManualLine] = useState(false);
   const [quoteStatus, setQuoteStatus] = useState(preview.status || "preview");
+  const [xeroSendState, setXeroSendState] = useState(preview.xeroSendState || "idle");
   const [sendError, setSendError] = useState("");
   const [sendResult, setSendResult] = useState(null);
   const [sendingToXero, setSendingToXero] = useState(false);
@@ -2727,7 +2733,7 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
   const lastSaveErrorRef = useRef(null);
   const pendingSaveCountRef = useRef(0);
   const lastLockRenewalRef = useRef(0);
-  const quoteIsLocked = quoteStatus !== "preview";
+  const quoteIsLocked = quoteStatus !== "preview" || ["sending", "unknown"].includes(xeroSendState);
   const selectedXeroDocumentLabel = xeroDocumentTypeLabel(xeroDocumentType);
   const isDraftQuote = xeroDocumentType === "draft_quote";
   const documentNumberLabel = isDraftQuote ? "Quote number" : "Invoice number";
@@ -2756,6 +2762,7 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
     setAddingManualLine(false);
     setEditingLine(null);
     setQuoteStatus(preview.status || "preview");
+    setXeroSendState(preview.xeroSendState || "idle");
     setSendError("");
     setSendResult(null);
     setSendingToXero(false);
@@ -2763,7 +2770,7 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
     versionRef.current = Number(preview.version || 1);
     if (lastSaveErrorRef.current) setSaveState("error");
     else setSaveState(pendingSaveCountRef.current ? "saving" : "saved");
-  }, [lines, preview.id, preview.totals, preview.warnings]);
+  }, [lines, preview.id, preview.totals, preview.warnings, preview.xeroSendState]);
 
   useEffect(() => {
     versionRef.current = Number(preview.version || versionRef.current || 1);
@@ -3157,9 +3164,28 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
         documentType: xeroDocumentType
       }));
       setQuoteStatus(payload.preview?.status || "approved_for_xero");
+      setXeroSendState(payload.preview?.xeroSendState || (payload.reused ? payload.xero?.state : "succeeded"));
       setSendResult(payload.xero || null);
     } catch (err) {
       setSendError(err.message);
+      if (err.details?.sendState) setXeroSendState(err.details.sendState);
+    } finally {
+      setSendingToXero(false);
+    }
+  }
+
+  async function handleReconcileXeroSend() {
+    if (!preview.id || xeroSendState !== "unknown") return;
+    setSendingToXero(true);
+    setSendError("");
+    setSendResult(null);
+    try {
+      const payload = await runDraftMutation((lifecycle) => reconcileQuoteXeroSend(preview.id, lifecycle));
+      setQuoteStatus(payload.preview?.status || "preview");
+      setXeroSendState(payload.preview?.xeroSendState || payload.xero?.state || "failed");
+      setSendResult(payload.xero || null);
+    } catch (error) {
+      setSendError(error.message);
     } finally {
       setSendingToXero(false);
     }
@@ -3247,15 +3273,22 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
             <button className="secondary-button" disabled={metadataSaving || quoteIsLocked} onClick={handleArchiveDraft} type="button">
               Archive
             </button>
-            <button
-              className="primary-action-button"
-              disabled={sendingToXero || metadataSaving || quoteIsLocked}
-              type="button"
-              onClick={handleSendToXero}
-            >
-              {sendingToXero ? <Loader2 className="spin" size={17} /> : <Send size={17} />}
-              {quoteStatus === "preview" ? "Send to Xero" : "Sent to Xero"}
-            </button>
+            {xeroSendState === "unknown" ? (
+              <button className="primary-action-button" disabled={sendingToXero} type="button" onClick={handleReconcileXeroSend}>
+                {sendingToXero ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
+                Reconcile Xero
+              </button>
+            ) : (
+              <button
+                className="primary-action-button"
+                disabled={sendingToXero || metadataSaving || quoteIsLocked}
+                type="button"
+                onClick={handleSendToXero}
+              >
+                {sendingToXero ? <Loader2 className="spin" size={17} /> : <Send size={17} />}
+                {quoteStatus === "preview" ? "Send to Xero" : "Sent to Xero"}
+              </button>
+            )}
           </div>
         </div>
 
@@ -3326,6 +3359,7 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
         {metadataError ? <p className="form-error">{metadataError}</p> : null}
         {lineError ? <p className="form-error">{lineError}</p> : null}
         {sendError ? <p className="form-error">{sendError}</p> : null}
+        {xeroSendState === "unknown" ? <div className="warning-banner">Xero may have received this document. Editing is paused until reconciliation confirms whether the remote document exists.</div> : null}
         {sendResult ? (
           <div className="quote-send-result" role="status">
             <strong>
@@ -4608,6 +4642,8 @@ function Shell({ onLogout, onUserUpdated, user }) {
   const monthOptions = useMemo(() => dataMonthOptions(report?.yearTrend), [report?.yearTrend]);
   const isReportingTab = activeTab.startsWith("reporting-");
   const isDocsTab = activeTab === "billing-quotes";
+  const isAdmin = Array.isArray(user?.roles) && user.roles.includes("admin");
+  const visibleBillingTabs = useMemo(() => billingTabs.filter((tab) => !tab.adminOnly || isAdmin), [isAdmin]);
   const docsMonthOptions = useMemo(() => quoteMonthOptions(billingQuotes), [billingQuotes]);
   const filteredBillingQuotes = useMemo(
     () => billingQuotes.filter((quote) => quoteMatchesRange(quote, range)),
@@ -4616,6 +4652,13 @@ function Shell({ onLogout, onUserUpdated, user }) {
 
   activeTabRef.current = activeTab;
   currentDraftIdRef.current = currentDraftId;
+
+  useEffect(() => {
+    if (activeTab === "billing-operations" && !isAdmin) {
+      setActiveTab("billing-quotes");
+      persistActiveTab("billing-quotes");
+    }
+  }, [activeTab, isAdmin]);
 
   async function loadSummary(nextRange = range) {
     setLoading(true);
@@ -4968,7 +5011,7 @@ function Shell({ onLogout, onUserUpdated, user }) {
                 <ChevronDown className="nav-chevron" size={16} />
               </button>
               <div className="nav-submenu" aria-label="Billing" hidden={!navGroupsOpen.billing} id="billing-nav">
-                {billingTabs.map((tab) => {
+                {visibleBillingTabs.map((tab) => {
                   const Icon = tab.icon;
                   return (
                     <button
@@ -5082,6 +5125,11 @@ function Shell({ onLogout, onUserUpdated, user }) {
               />
             ) : null}
             {activeTab === "billing-audit-log" ? <AuditLogView /> : null}
+            {activeTab === "billing-operations" && isAdmin ? (
+              <Suspense fallback={<div className="loading-state inline-loading"><Loader2 className="spin" size={20} /><span>Loading operations</span></div>}>
+                <OperationsView />
+              </Suspense>
+            ) : null}
           </div>
         )}
       </section>

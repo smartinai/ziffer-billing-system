@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: ziffer_billing_test
+          POSTGRES_USER: ziffer
+          POSTGRES_PASSWORD: ziffer_test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ziffer -d ziffer_billing_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://ziffer:ziffer_test_password@127.0.0.1:5432/ziffer_billing_test
+      DATABASE_SSL: "false"
+      COOKIE_SECURE: "false"
+      DEFAULT_START_DATE: 2026-01-01
+      DEFAULT_TIMEZONE: Europe/Amsterdam
+      SESSION_SECRET: ci-only-session-secret-not-used-in-production
+      TEAMWORK_API_KEY: ci-placeholder
+      TEAMWORK_SITE_NAME: ci-placeholder
+      XERO_CLIENT_ID: ci-placeholder
+      XERO_CLIENT_SECRET: ci-placeholder
+      XERO_REDIRECT_URI: http://127.0.0.1:3100/api/xero/callback
+      XERO_RETURN_URL: http://127.0.0.1:3100/#billing-quotes
+      XERO_TOKEN_ENCRYPTION_KEY: ci-only-encryption-key-not-used-in-production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - run: npm run db:migrate
+      - name: Verify migrations are repeatable
+        run: npm run db:migrate
+      - name: Verify restore and forward migration
+        run: |
+          PGPASSWORD=ziffer_test_password createdb -h 127.0.0.1 -p 5432 -U ziffer ziffer_legacy_test
+          DATABASE_URL="postgres://ziffer:ziffer_test_password@127.0.0.1:5432/ziffer_legacy_test" npm run db:migrate -- --through=013_teamwork_scheduled_sync
+          POSTGRES_CONTAINER="$(docker ps --filter 'ancestor=postgres:17-alpine' --format '{{.ID}}' | head -n 1)"
+          test -n "$POSTGRES_CONTAINER"
+          docker exec "$POSTGRES_CONTAINER" pg_dump -U ziffer -d ziffer_legacy_test -Fc > /tmp/ziffer-ci.dump
+          PGPASSWORD=ziffer_test_password createdb -h 127.0.0.1 -p 5432 -U ziffer ziffer_restored_test
+          docker exec -i "$POSTGRES_CONTAINER" pg_restore --no-owner --no-privileges -U ziffer -d ziffer_restored_test < /tmp/ziffer-ci.dump
+          DATABASE_URL="postgres://ziffer:ziffer_test_password@127.0.0.1:5432/ziffer_restored_test" npm run db:migrate
+      - run: npm run check
+      - run: npm run db:seed-e2e
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - name: Upload browser evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-evidence
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 14

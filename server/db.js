@@ -1,9 +1,22 @@
 import pg from "pg";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { config } from "./config.js";
 
 const { Pool } = pg;
 
 let pool;
+const migrationsDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../migrations");
+let expectedMigrationIdPromise;
+
+function expectedMigrationId() {
+  if (!expectedMigrationIdPromise) {
+    expectedMigrationIdPromise = fs.readdir(migrationsDirectory)
+      .then((files) => files.filter((file) => file.endsWith(".sql")).sort().at(-1)?.replace(/\.sql$/i, "") || "");
+  }
+  return expectedMigrationIdPromise;
+}
 
 function databaseSslConfig() {
   return config.databaseSsl ? { rejectUnauthorized: false } : false;
@@ -38,24 +51,34 @@ export async function checkDatabase() {
   if (!isDatabaseConfigured()) {
     return {
       configured: false,
-      ok: true,
-      message: "DATABASE_URL is not configured. The app is running without database-backed invoice features."
+      ok: false,
+      message: "Database readiness is not configured."
     };
   }
 
   try {
-    const result = await query("select current_database() as database_name, now() as checked_at");
+    const migrationId = await expectedMigrationId();
+    const result = await query(
+      `select current_database() as database_name,
+              clock_timestamp() as checked_at,
+              exists(select 1 from schema_migrations where id = $1) as migration_ready`,
+      [migrationId]
+    );
+    const migrationReady = Boolean(result.rows[0]?.migration_ready);
     return {
       configured: true,
-      ok: true,
+      ok: migrationReady,
       database: result.rows[0]?.database_name || "",
-      checkedAt: result.rows[0]?.checked_at || new Date().toISOString()
+      checkedAt: result.rows[0]?.checked_at || new Date().toISOString(),
+      expectedMigration: migrationId,
+      migrationReady,
+      message: migrationReady ? "" : "The database schema is not ready for this application release."
     };
   } catch (error) {
     return {
       configured: true,
       ok: false,
-      message: error.message || "Database check failed."
+      message: "Database readiness check failed."
     };
   }
 }
