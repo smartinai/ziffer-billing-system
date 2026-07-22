@@ -54,9 +54,11 @@ jobs:
         run: |
           PGPASSWORD=ziffer_test_password createdb -h 127.0.0.1 -p 5432 -U ziffer ziffer_legacy_test
           DATABASE_URL="postgres://ziffer:ziffer_test_password@127.0.0.1:5432/ziffer_legacy_test" npm run db:migrate -- --through=013_teamwork_scheduled_sync
-          pg_dump "postgres://ziffer:ziffer_test_password@127.0.0.1:5432/ziffer_legacy_test" -Fc > /tmp/ziffer-ci.dump
+          POSTGRES_CONTAINER="$(docker ps --filter 'ancestor=postgres:17-alpine' --format '{{.ID}}' | head -n 1)"
+          test -n "$POSTGRES_CONTAINER"
+          docker exec "$POSTGRES_CONTAINER" pg_dump -U ziffer -d ziffer_legacy_test -Fc > /tmp/ziffer-ci.dump
           PGPASSWORD=ziffer_test_password createdb -h 127.0.0.1 -p 5432 -U ziffer ziffer_restored_test
-          pg_restore --no-owner --no-privileges -d "postgres://ziffer:ziffer_test_password@127.0.0.1:5432/ziffer_restored_test" /tmp/ziffer-ci.dump
+          docker exec -i "$POSTGRES_CONTAINER" pg_restore --no-owner --no-privileges -U ziffer -d ziffer_restored_test < /tmp/ziffer-ci.dump
           DATABASE_URL="postgres://ziffer:ziffer_test_password@127.0.0.1:5432/ziffer_restored_test" npm run db:migrate
       - run: npm run check
       - run: npm run db:seed-e2e
