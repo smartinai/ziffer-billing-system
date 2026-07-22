@@ -41,7 +41,7 @@ failure() {
 }
 trap failure EXIT INT TERM
 
-sh "$APP_DIR/ops/backup-daily.sh"
+sh "$APP_DIR/ops/backup-predeploy.sh"
 git checkout --detach "$target_sha"
 docker build --label ziffer.release=true --label "ziffer.commit=$target_sha" -t "$target_image" .
 

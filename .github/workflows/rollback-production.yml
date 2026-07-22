@@ -33,4 +33,4 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           TARGET_SHA: ${{ inputs.commit_sha }}
-        run: ssh -i ~/.ssh/ziffer_deploy "$VPS_USER@$VPS_HOST" "sudo sh /opt/ziffer-billing-v2/ops/rollback.sh '$TARGET_SHA'"
+        run: ssh -i ~/.ssh/ziffer_deploy "$VPS_USER@$VPS_HOST" "STATE_DIR=/opt/ziffer-billing-v2/.state sh /opt/ziffer-billing-v2/ops/rollback.sh '$TARGET_SHA'"
