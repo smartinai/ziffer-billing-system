@@ -151,9 +151,17 @@ test("draft financial state, locking, task billing, archive, and restore are dur
   await inlineRateButton.click();
   const inlineRateInput = page.locator('input[aria-label="Rate for E2E Inline Row"]');
   await inlineRateInput.fill("120");
+  const rateSave = page.waitForResponse((response) =>
+    response.request().method() === "PATCH"
+      && response.url().includes("/api/billing/quote-previews/")
+      && !response.url().includes("/editor-lock")
+  );
   await inlineRateInput.press("Enter");
+  await rateSave;
   await expect(inlineRateInput).toHaveCount(0);
-  await page.getByRole("button", { name: "Edit Discount for E2E Inline Row" }).click();
+  const discountButton = page.getByRole("button", { name: "Edit Discount for E2E Inline Row" });
+  await expect(discountButton).toBeEnabled();
+  await discountButton.click();
   const inlineDiscountInput = page.locator('input[aria-label="Discount for E2E Inline Row"]');
   await inlineDiscountInput.fill("20");
   await inlineDiscountInput.press("Enter");
