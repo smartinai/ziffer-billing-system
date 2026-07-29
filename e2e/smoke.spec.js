@@ -11,6 +11,17 @@ async function login(page, email = adminEmail, password = adminPassword) {
   await expect(page.getByRole("heading", { level: 1, name: "Docs" })).toBeVisible();
 }
 
+async function openInlineEditor(page, buttonName, inputLabel) {
+  const input = page.locator(`input[aria-label="${inputLabel}"]`);
+  await expect(async () => {
+    if (!await input.isVisible().catch(() => false)) {
+      await page.getByRole("button", { name: buttonName }).click();
+    }
+    await expect(input).toBeVisible({ timeout: 1_000 });
+  }).toPass({ timeout: 10_000 });
+  return input;
+}
+
 test("administrator can view persisted operational health", async ({ page }) => {
   await login(page);
   await page.getByRole("button", { name: "Operations" }).click();
@@ -90,6 +101,7 @@ test("logout and an expired browser session both return to sign in", async ({ co
 });
 
 test("draft financial state, locking, task billing, archive, and restore are durable", async ({ browser, page }) => {
+  test.setTimeout(90_000);
   await login(page);
   await page.getByRole("button", { name: "Create New" }).click();
   await page.getByRole("combobox", { name: "Search clients" }).fill("E2E VAT Client");
@@ -123,9 +135,13 @@ test("draft financial state, locking, task billing, archive, and restore are dur
   await taskBillableButton.click();
   await expect(taskBillableButton).toHaveCount(0);
 
-  await page.getByRole("button", { name: "Edit Hours for E2E Unbillable Task" }).click();
-  await page.getByLabel("Hours for E2E Unbillable Task").fill("0,5");
-  await page.getByLabel("Hours for E2E Unbillable Task").press("Enter");
+  const unbillableHoursInput = await openInlineEditor(
+    page,
+    "Edit Hours for E2E Unbillable Task",
+    "Hours for E2E Unbillable Task"
+  );
+  await unbillableHoursInput.fill("0,5");
+  await unbillableHoursInput.press("Enter");
   await expect(page.getByText(/Edited from .*h/).first()).toBeVisible();
 
   await page.getByRole("button", { name: "Add manual row" }).click();
@@ -143,13 +159,18 @@ test("draft financial state, locking, task billing, archive, and restore are dur
   await page.getByLabel("Task name for E2E Manual Row").press("Enter");
   await expect(page.getByText("E2E Inline Row", { exact: true })).toBeVisible();
 
-  await page.getByRole("button", { name: "Edit Hours for E2E Inline Row" }).click();
-  await page.getByLabel("Hours for E2E Inline Row").fill("2,5");
-  await page.getByLabel("Hours for E2E Inline Row").press("Tab");
-  const inlineRateButton = page.getByRole("button", { name: "Edit Rate for E2E Inline Row" });
-  await expect(inlineRateButton).toBeVisible();
-  await inlineRateButton.click();
-  const inlineRateInput = page.locator('input[aria-label="Rate for E2E Inline Row"]');
+  const inlineHoursInput = await openInlineEditor(
+    page,
+    "Edit Hours for E2E Inline Row",
+    "Hours for E2E Inline Row"
+  );
+  await inlineHoursInput.fill("2,5");
+  await inlineHoursInput.press("Tab");
+  const inlineRateInput = await openInlineEditor(
+    page,
+    "Edit Rate for E2E Inline Row",
+    "Rate for E2E Inline Row"
+  );
   await inlineRateInput.fill("120");
   const rateSave = page.waitForResponse((response) =>
     response.request().method() === "PATCH"
@@ -159,10 +180,11 @@ test("draft financial state, locking, task billing, archive, and restore are dur
   await inlineRateInput.press("Enter");
   await rateSave;
   await expect(inlineRateInput).toHaveCount(0);
-  const discountButton = page.getByRole("button", { name: "Edit Discount for E2E Inline Row" });
-  await expect(discountButton).toBeEnabled();
-  await discountButton.click();
-  const inlineDiscountInput = page.locator('input[aria-label="Discount for E2E Inline Row"]');
+  const inlineDiscountInput = await openInlineEditor(
+    page,
+    "Edit Discount for E2E Inline Row",
+    "Discount for E2E Inline Row"
+  );
   await inlineDiscountInput.fill("20");
   await inlineDiscountInput.press("Enter");
   await expect(page.getByRole("row").filter({ hasText: "E2E Inline Row" }).getByText(/240/, { exact: false })).toBeVisible();

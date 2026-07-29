@@ -324,6 +324,11 @@ function quoteLineSourceSnapshot(line = {}) {
     annualBilling: Array.isArray(line.annualBilling) ? line.annualBilling : [],
     annualCoverage: Array.isArray(line.annualCoverage) ? line.annualCoverage : [],
     entries: Array.isArray(line.entries) ? line.entries : [],
+    generatedValues: {
+      discount: Number(line.discount || 0),
+      quantityHours: Number(line.quantityHours || 0),
+      unitAmount: Number(line.unitAmount || 0)
+    },
     serviceKey: line.serviceKey || "",
     serviceLabel: line.serviceLabel || ""
   };
@@ -336,6 +341,9 @@ function savedQuoteLine(row = {}) {
     annualBilling: Array.isArray(snapshot.annualBilling) ? snapshot.annualBilling : [],
     annualCoverage: Array.isArray(snapshot.annualCoverage) ? snapshot.annualCoverage : [],
     entries: Array.isArray(snapshot.entries) ? snapshot.entries : [],
+    generatedValues: snapshot.generatedValues && typeof snapshot.generatedValues === "object"
+      ? snapshot.generatedValues
+      : null,
     serviceKey: snapshot.serviceKey || row.serviceKey || "",
     serviceLabel: snapshot.serviceLabel || row.serviceLabel || ""
   };
@@ -2368,7 +2376,8 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
             include_in_xero as "includeInXero",
             is_billable as "isBillable",
             annual_covered as "annualCovered",
-            comments
+            comments,
+            source_snapshot as "sourceSnapshot"
           from quote_lines
           where id = $1
             and quote_preview_id = $2
@@ -2384,6 +2393,16 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
       }
 
       const currentLine = lineResult.rows[0];
+      const sourceSnapshot = currentLine.sourceSnapshot && typeof currentLine.sourceSnapshot === "object"
+        ? currentLine.sourceSnapshot
+        : {};
+      if (!sourceSnapshot.generatedValues) {
+        sourceSnapshot.generatedValues = {
+          discount: Number(currentLine.discount || 0),
+          quantityHours: Number(currentLine.quantityHours || 0),
+          unitAmount: Number(currentLine.unitAmount || 0)
+        };
+      }
       assertEditableQuoteLinePatch(line);
       const discount = Object.hasOwn(line, "discount") ? toDiscount(line.discount) : Number(currentLine.discount || 0);
       const serviceId = Object.hasOwn(line, "serviceId") ? compactText(line.serviceId) || null : currentLine.serviceId;
@@ -2449,6 +2468,7 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
             include_in_xero = $13,
             service_id = $14,
             annual_year = $15,
+            source_snapshot = $16,
             updated_at = now()
           where id = $1
             and quote_preview_id = $2
@@ -2468,7 +2488,8 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
           nextLine.comments,
           includeInXero,
           nextLine.serviceId,
-          nextLine.annualYear
+          nextLine.annualYear,
+          JSON.stringify(sourceSnapshot)
         ]
       );
     }
