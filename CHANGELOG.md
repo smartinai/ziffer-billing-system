@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-29
+
+### Added
+
+- Draft task rows now show the original generated hours, rate, and discount beneath any edited value.
+
+### Changed
+
+- Original task-line values are preserved in the durable source snapshot so override indicators survive navigation and refresh.
+- Existing drafts establish their original-value baseline safely when a task row is next edited.
+
 ## [0.6.0] - 2026-07-29
 
 ### Added

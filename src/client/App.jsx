@@ -69,10 +69,12 @@ import EditableQuoteCell from "./EditableQuoteCell.jsx";
 import ItemCodePicker from "./ItemCodePicker.jsx";
 import {
   hasQuoteLineHoursOverride,
+  hasQuoteLineValueOverride,
   inlineQuoteLineDraftValue,
   inlineQuoteLineFields,
   normalizeInlineQuoteLineValue,
-  sourceHoursForQuoteLine
+  sourceHoursForQuoteLine,
+  sourceValueForQuoteLine
 } from "./quoteLineEditing.js";
 import XeroDocumentPreviewModal from "./XeroDocumentPreviewModal.jsx";
 import { appVersionLabel } from "./version.js";
@@ -3682,7 +3684,12 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
                           onMove={moveInlineEdit}
                           textAlign="right"
                         >
-                          {formatCurrencyAmount(line.unitAmount, currencyCode)}
+                          <span className="quote-inline-value-stack">
+                            <span>{formatCurrencyAmount(line.unitAmount, currencyCode)}</span>
+                            {hasQuoteLineValueOverride(line, "unitAmount")
+                              ? <small>Edited from {formatCurrencyAmount(sourceValueForQuoteLine(line, "unitAmount"), currencyCode)}</small>
+                              : null}
+                          </span>
                         </EditableQuoteCell>
                       </td>
                       <td>
@@ -3702,7 +3709,12 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
                           onMove={moveInlineEdit}
                           textAlign="right"
                         >
-                          {decimal.format(line.discount || 0)}%
+                          <span className="quote-inline-value-stack">
+                            <span>{decimal.format(line.discount || 0)}%</span>
+                            {hasQuoteLineValueOverride(line, "discount")
+                              ? <small>Edited from {decimal.format(sourceValueForQuoteLine(line, "discount"))}%</small>
+                              : null}
+                          </span>
                         </EditableQuoteCell>
                       </td>
                       <td>{formatCurrencyAmount(line.amount, currencyCode)}</td>

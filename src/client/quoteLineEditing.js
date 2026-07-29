@@ -28,10 +28,23 @@ export function normalizeInlineQuoteLineValue(field, value) {
 }
 
 export function sourceHoursForQuoteLine(line = {}) {
+  const generatedHours = Number(line.generatedValues?.quantityHours);
+  if (Number.isFinite(generatedHours)) return generatedHours;
   return Math.round((line.entries || []).reduce((sum, entry) => sum + Number(entry.hours || 0), 0) * 10000) / 10000;
 }
 
 export function hasQuoteLineHoursOverride(line = {}) {
-  if (!(line.entries || []).length || line.annualCovered || (line.annualCoverage || []).length || (line.annualBilling || []).length) return false;
+  if (!line.generatedValues && (!(line.entries || []).length || line.annualCovered || (line.annualCoverage || []).length || (line.annualBilling || []).length)) return false;
   return Math.abs(sourceHoursForQuoteLine(line) - Number(line.quantityHours || 0)) > 0.00005;
+}
+
+export function sourceValueForQuoteLine(line = {}, field) {
+  const value = Number(line.generatedValues?.[field]);
+  return Number.isFinite(value) ? value : null;
+}
+
+export function hasQuoteLineValueOverride(line = {}, field) {
+  const sourceValue = sourceValueForQuoteLine(line, field);
+  if (sourceValue === null) return false;
+  return Math.abs(sourceValue - Number(line[field] || 0)) > 0.00005;
 }
