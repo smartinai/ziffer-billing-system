@@ -162,6 +162,43 @@ export async function fetchProjects() {
   );
 }
 
+export async function fetchTasks(taskIds = []) {
+  const ids = [...new Set(taskIds.map((value) => String(value || "").trim()).filter(Boolean))];
+  if (!ids.length) {
+    return { rows: [], metadata: { pagesFetched: 0, partial: false, sourceUrl: null } };
+  }
+
+  const rows = [];
+  const metadata = [];
+  const batchSize = 200;
+  for (let index = 0; index < ids.length; index += batchSize) {
+    const response = await fetchAllPages(
+      "/projects/api/v3/tasks.json",
+      {
+        ids: ids.slice(index, index + batchSize).join(","),
+        nestSubTasks: "false",
+        showDeleted: "false",
+        skipCounts: "true",
+        taskFilter: "all"
+      },
+      ["tasks", "todoItems"]
+    );
+    rows.push(...response.rows);
+    metadata.push(response.metadata);
+    await sleep(config.pageDelayMs);
+  }
+
+  return {
+    rows,
+    metadata: {
+      pagesFetched: metadata.reduce((sum, item) => sum + Number(item.pagesFetched || 0), 0),
+      partial: metadata.some((item) => item.partial),
+      sourceUrl: metadata.at(-1)?.sourceUrl || null,
+      warning: metadata.find((item) => item.warning)?.warning
+    }
+  };
+}
+
 export async function fetchTimeEntries(startDate, endDate) {
   return fetchAllPages(
     "/projects/api/v3/time.json",

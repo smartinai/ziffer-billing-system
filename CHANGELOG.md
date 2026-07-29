@@ -6,6 +6,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-29
+
+### Added
+
+- Added the Maintain corporate records annual service with automatic task-title period recognition and a shared 12-hour allowance per client and period.
+- Added explicit annual coverage periods for exact dates, month ranges, calendar years, and rolling `until Month Year` task titles.
+
+### Changed
+
+- Corporate-record time outside its task period or above the 12-hour allowance remains invoiceable.
+- Annual Invoices shows compact corporate-record period and usage details without a remaining-hours metric.
+
+### Fixed
+
+- Unparseable corporate-record periods now remain invoiceable and produce a visible draft warning instead of being silently treated as prepaid.
+
 ## [0.4.0] - 2026-07-29
 
 ### Added

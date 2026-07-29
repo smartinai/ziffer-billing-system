@@ -2059,6 +2059,23 @@ td strong {
   outline: 2px solid rgba(79, 149, 158, 0.14);
 }
 
+.annual-period-cell {
+  display: grid;
+  gap: 6px;
+}
+
+.annual-period-record {
+  display: grid;
+  gap: 6px;
+}
+
+.annual-period-record p {
+  margin: 0;
+  color: #627276;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .billing-clients-table {
   min-width: 980px;
   table-layout: fixed;

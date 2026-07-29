@@ -1,3 +1,9 @@
+import {
+  dateIsWithinPeriod,
+  isMaintainCorporateRecordsTask,
+  parseMaintainCorporateRecordsPeriod
+} from "./annualServicePeriods.js";
+
 function round(value, decimals = 2) {
   const factor = 10 ** decimals;
   return Math.round((Number(value || 0) + Number.EPSILON) * factor) / factor;
@@ -125,6 +131,10 @@ function warningDetails(type, count = 0) {
   const labels = {
     invoiced_in_teamwork: ["Already linked in Teamwork", `${count} source ${count === 1 ? "entry is" : "entries are"} already linked to a Teamwork invoice.`],
     missing_service: ["Missing service", `${count} source ${count === 1 ? "entry needs" : "entries need"} a standardized service.`],
+    missing_corporate_records_period: [
+      "Corporate records period missing",
+      `${count} source ${count === 1 ? "entry has" : "entries have"} a Maintain corporate records task without a recognizable period. The time remains invoiceable.`
+    ],
     missing_tax_rate: ["Missing tax rate", "Set a tax rate on the billing client before pushing to Xero."],
     missing_xero_client: ["Missing Xero client", "Map this billing client to a Xero client before pushing to Xero."],
     no_time_entries: ["No source time", "No stored Teamwork time was found for this client and period."],
@@ -170,14 +180,18 @@ function entryYear(entry, fallbackDate) {
   return match ? Number(match[1]) : null;
 }
 
-function annualUsageKey(serviceId, year) {
-  return `${serviceId || ""}:${year || ""}`;
+function annualUsageKey(serviceId, year, coverageStart = "", coverageEnd = "") {
+  if (coverageStart && coverageEnd) return `${serviceId || ""}:period:${coverageStart}:${coverageEnd}`;
+  return `${serviceId || ""}:year:${year || ""}`;
 }
 
 function annualCoverageComment(coverage) {
   if (!coverage) return "";
 
-  const base = `Covered by annual invoice (${coverage.year})`;
+  const periodLabel = coverage.coverageStart && coverage.coverageEnd
+    ? `${coverage.coverageStart}–${coverage.coverageEnd}`
+    : coverage.year;
+  const base = `Covered by annual invoice (${periodLabel})`;
   if (coverage.annualHours === null) return `${base}: ${hoursLabel(coverage.coveredHours)} in this doc.`;
 
   return `${base}: ${hoursLabel(coverage.usedHoursBefore)} used before, ${hoursLabel(coverage.coveredHours)} in this doc, ${hoursLabel(coverage.remainingAfter)} remaining.`;
@@ -188,17 +202,23 @@ function normalizeAnnualUsage(annualUsage = []) {
   for (const usage of annualUsage) {
     const serviceId = compactText(usage.serviceId);
     const year = Number(usage.year || usage.forYear);
-    if (!serviceId || !Number.isInteger(year)) continue;
+    const coverageStart = compactText(usage.coverageStart).slice(0, 10);
+    const coverageEnd = compactText(usage.coverageEnd).slice(0, 10);
+    const hasPeriod = Boolean(coverageStart && coverageEnd);
+    if (!serviceId || (!hasPeriod && !Number.isInteger(year))) continue;
 
     const annualHours = usage.annualHours ?? usage.maxHours;
     const usedHours = usage.usedHours ?? 0;
-    map.set(annualUsageKey(serviceId, year), {
+    map.set(annualUsageKey(serviceId, year, coverageStart, coverageEnd), {
       annualHours: annualHours === "" || annualHours === null || annualHours === undefined ? null : Number(annualHours),
+      coverageEnd,
+      coverageStart,
+      periodSource: compactText(usage.periodSource),
       previewHours: 0,
       serviceId,
       usageId: compactText(usage.usageId || usage.id),
       usedHours: Number(usedHours || 0),
-      year
+      year: Number.isInteger(year) ? year : Number(coverageEnd.slice(0, 4))
     });
   }
   return map;
@@ -220,12 +240,52 @@ function annualCoverageTaskMatch(taskName, service) {
     return task.includes("value added tax") || /\bvat\s+20\d{2}\b/.test(task);
   }
 
+  if (service.serviceKey === "maintain_corporate_records") {
+    return isMaintainCorporateRecordsTask(taskName);
+  }
+
   return true;
 }
 
 function annualCoverageForEntry({ annualUsageByKey, annualYear = null, entry, forceService = false, hours, periodEnd, service }) {
   if (!service?.id || service.annualInvoiceEligible === false) return null;
   if (!forceService && !annualCoverageTaskMatch(entry.taskName, service)) return null;
+
+  if (service.serviceKey === "maintain_corporate_records") {
+    const coveragePeriod = parseMaintainCorporateRecordsPeriod(entry.taskName);
+    if (!coveragePeriod || !dateIsWithinPeriod(entry.date || entry.loggedOn, coveragePeriod)) return null;
+
+    const usage = annualUsageByKey.get(
+      annualUsageKey(service.id, Number(coveragePeriod.endDate.slice(0, 4)), coveragePeriod.startDate, coveragePeriod.endDate)
+    );
+    if (!usage) return null;
+
+    const annualHours = Number.isFinite(usage.annualHours) && usage.annualHours > 0 ? usage.annualHours : null;
+    if (annualHours === null) return null;
+    const usedHoursBefore = usage.usedHours + usage.previewHours;
+    const remainingBefore = Math.max(annualHours - usedHoursBefore, 0);
+    const coveredHours = Math.min(hours, remainingBefore);
+
+    usage.previewHours += coveredHours;
+    const usedHoursAfter = usage.usedHours + usage.previewHours;
+    const remainingAfter = Math.max(annualHours - usedHoursAfter, 0);
+
+    return {
+      annualHours,
+      coverageEnd: coveragePeriod.endDate,
+      coverageStart: coveragePeriod.startDate,
+      coveredHours,
+      key: annualUsageKey(service.id, usage.year, coveragePeriod.startDate, coveragePeriod.endDate),
+      periodSource: coveragePeriod.source,
+      remainingAfter,
+      remainingBefore,
+      serviceId: service.id,
+      usageId: usage.usageId,
+      usedHoursAfter,
+      usedHoursBefore,
+      year: usage.year
+    };
+  }
 
   const overrideYear = Number(annualYear || entry.annualYear);
   const hasExplicitAnnualYear = Number.isInteger(overrideYear);
@@ -290,7 +350,10 @@ function splitEntryForAnnualCoverage(entry, hours, annualCoverage) {
       annualCoverage: null,
       annualOverflow: {
         annualHours: annualCoverage.annualHours,
+        coverageEnd: annualCoverage.coverageEnd || "",
+        coverageStart: annualCoverage.coverageStart || "",
         key: annualCoverage.key,
+        periodSource: annualCoverage.periodSource || "",
         remainingAfter: annualCoverage.remainingAfter,
         serviceId: annualCoverage.serviceId,
         usageId: annualCoverage.usageId,
@@ -346,7 +409,12 @@ export function buildAggregatedQuotePreview({
   const servicesById = new Map(services.map((service) => [compactText(service.id), service]));
   const serviceOverridesByKey = normalizeServiceOverrides(serviceOverrides);
   const excludedInvoicedEntries = entries.filter((entry) => compactText(entry.teamworkInvoiceId));
-  const sourceEntries = entries.filter((entry) => !compactText(entry.teamworkInvoiceId));
+  const sourceEntries = entries
+    .filter((entry) => !compactText(entry.teamworkInvoiceId))
+    .sort((a, b) =>
+      String(a.date || a.loggedOn || "").localeCompare(String(b.date || b.loggedOn || ""))
+      || String(a.id || "").localeCompare(String(b.id || ""))
+    );
 
   if (!client.xeroClientName || !client.xeroContactId) addWarningCount(warningCounts, "missing_xero_client");
   if (!client.taxRateName && !client.taxType) addWarningCount(warningCounts, "missing_tax_rate");
@@ -373,6 +441,9 @@ export function buildAggregatedQuotePreview({
     const rate = Number(entry.userRate || 0);
     const serviceMatch = serviceForEntry(entry, services, servicesById, serviceOverridesByKey);
     const service = serviceMatch.service;
+    const missingCorporateRecordsPeriod = service?.serviceKey === "maintain_corporate_records"
+      && isMaintainCorporateRecordsTask(entry.taskName)
+      && !parseMaintainCorporateRecordsPeriod(entry.taskName);
     const annualCoverage = isBillable
       ? annualCoverageForEntry({ annualUsageByKey, annualYear: serviceMatch.annualYear, entry, forceService: serviceMatch.manual, hours, periodEnd, service })
       : null;
@@ -392,6 +463,10 @@ export function buildAggregatedQuotePreview({
       if (!service) {
         warnings.push("missing_service");
         addWarningCount(warningCounts, "missing_service");
+      }
+      if (missingCorporateRecordsPeriod) {
+        warnings.push("missing_corporate_records_period");
+        addWarningCount(warningCounts, "missing_corporate_records_period");
       }
       if (!isBillable) {
         warnings.push("unbillable_time");
@@ -460,7 +535,10 @@ export function buildAggregatedQuotePreview({
       if (partAnnualCoverage) {
         const group = line.annualCoverageGroups.get(partAnnualCoverage.key) || {
           annualHours: partAnnualCoverage.annualHours,
+          coverageEnd: partAnnualCoverage.coverageEnd || "",
+          coverageStart: partAnnualCoverage.coverageStart || "",
           coveredHours: 0,
+          periodSource: partAnnualCoverage.periodSource || "",
           remainingAfter: partAnnualCoverage.remainingAfter,
           remainingBefore: partAnnualCoverage.remainingBefore,
           serviceId: partAnnualCoverage.serviceId,
@@ -479,6 +557,9 @@ export function buildAggregatedQuotePreview({
           amount: 0,
           annualHours: part.annualOverflow.annualHours,
           billedHours: 0,
+          coverageEnd: part.annualOverflow.coverageEnd || "",
+          coverageStart: part.annualOverflow.coverageStart || "",
+          periodSource: part.annualOverflow.periodSource || "",
           prepaidAppliedHours: 0,
           remainingAfter: part.annualOverflow.remainingAfter,
           serviceId: part.annualOverflow.serviceId,

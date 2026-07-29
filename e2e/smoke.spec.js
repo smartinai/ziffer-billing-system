@@ -206,7 +206,7 @@ test("draft financial state, locking, task billing, archive, and restore are dur
   await page.getByRole("dialog", { name: "Quote preview" }).getByRole("button", { name: "Archive" }).click();
   await expect(page.getByRole("heading", { level: 1, name: "Docs" })).toBeVisible();
   await expect(page.getByRole("heading", { level: 2, name: "Archived" })).toBeVisible();
-  await page.getByRole("button", { name: "Restore" }).click();
+  await page.getByRole("row").filter({ hasText: "E2E VAT Client" }).getByRole("button", { name: "Restore" }).click();
   await expect(page).toHaveURL(new RegExp(`#billing-create-quote/${draftId}$`));
   await expect(page.getByText("0.15h", { exact: true }).first()).toBeVisible();
 });
