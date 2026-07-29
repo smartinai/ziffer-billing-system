@@ -35,6 +35,46 @@ test("calculates totals, billable hours, and money from user rates", () => {
   assert.equal(report.byProject.length, 2);
 });
 
+test("applies Maria's client role rates throughout reporting", () => {
+  const report = buildReport({
+    endDate: "2026-04-30",
+    mariaRatePolicy: {
+      expected: true,
+      rolesByProject: new Map([["p1", "director"], ["p2", "standard"]]),
+      userId: "maria"
+    },
+    projects,
+    startDate: "2026-04-01",
+    timeEntries: [
+      { date: "2026-04-02", id: "1", isBillable: true, minutes: 60, projectId: "p1", userId: "maria" },
+      { date: "2026-04-03", id: "2", isBillable: true, minutes: 60, projectId: "p2", userId: "maria" }
+    ],
+    users: [{ id: "maria", name: "Maria Tkachenko", userRate: 1 }]
+  });
+
+  assert.equal(report.totals.allMoney, 1050);
+  assert.equal(report.totals.money, 1050);
+  assert.equal(report.byUser[0].totals.allMoney, 1050);
+  assert.equal(report.byProject.find((project) => project.id === "p1").totals.money, 300);
+  assert.equal(report.byProject.find((project) => project.id === "p2").totals.money, 750);
+  assert.equal(report.yearTrend.find((month) => month.period === "2026-04").money, 1050);
+  assert.deepEqual(report.metadata.rateWarnings, []);
+});
+
+test("preserves stored rates and reports missing Maria configuration", () => {
+  const report = buildReport({
+    endDate: "2026-04-30",
+    mariaRatePolicy: { expected: true, rolesByProject: new Map(), userId: "" },
+    projects,
+    startDate: "2026-04-01",
+    timeEntries: [{ date: "2026-04-02", id: "1", isBillable: true, minutes: 60, projectId: "p1", userId: "u1" }],
+    users
+  });
+
+  assert.equal(report.totals.money, 200);
+  assert.equal(report.metadata.rateWarnings.length, 1);
+});
+
 test("adds people breakdowns for each project", () => {
   const report = buildReport({
     endDate: "2026-04-30",

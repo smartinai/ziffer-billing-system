@@ -1,9 +1,12 @@
 import { buildAggregatedQuotePreview, splitManualLineForAnnualCoverage } from "../src/shared/quoteDrafts.js";
+import { mariaRateForEntry } from "../src/shared/mariaRoleRates.js";
 import crypto from "node:crypto";
+import { config } from "./config.js";
 import { getDatabasePool } from "./db.js";
 import { openAlertIncident, resolveAlertIncident } from "./operationsRepository.js";
 import { fetchTask } from "./teamworkClient.js";
 import { findXeroDocumentByNumber, sendQuoteRequestToXero } from "./xeroClient.js";
+import { buildXeroDocumentPreview } from "./xeroDocumentPreview.js";
 
 const validDate = /^\d{4}-\d{2}-\d{2}$/;
 const validUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -188,6 +191,7 @@ function mapBillingClient(row) {
     discount: Number(row.discount || 0),
     displayName: row.displayName || "",
     id: row.id,
+    mariaRole: row.mariaRole || "standard",
     status: row.status || "active",
     taxRateName: row.taxRateName || "",
     taxType: row.taxType || "",
@@ -276,6 +280,39 @@ function sourceTimeEntryIds(value) {
   return value.map((entryId) => compactText(entryId)).filter(Boolean);
 }
 
+function applyMariaRoleRates(entries, billingClient, mariaTeamworkUserId = config.mariaTeamworkUserId) {
+  return entries.map((entry) => ({
+    ...entry,
+    userRate: mariaRateForEntry({
+      defaultRate: entry.userRate,
+      mariaRole: billingClient?.mariaRole,
+      mariaTeamworkUserId,
+      userId: entry.userId
+    })
+  }));
+}
+
+function applySnapshottedEntryRates(entries, lines = []) {
+  const rates = new Map();
+  for (const line of lines) {
+    for (const entry of line.sourceSnapshot?.entries || line.entries || []) {
+      if (entry?.id === undefined || entry?.id === null || !Number.isFinite(Number(entry.userRate))) continue;
+      rates.set(String(entry.id), Number(entry.userRate));
+    }
+  }
+  return entries.map((entry) => rates.has(String(entry.id)) ? { ...entry, userRate: rates.get(String(entry.id)) } : entry);
+}
+
+function assertEditableQuoteLinePatch(line = {}) {
+  const protectedFields = ["entries", "sourceTimeEntryIds", "sourceSnapshot"];
+  if (protectedFields.some((field) => Object.hasOwn(line, field))) {
+    throw draftError("Source time entries cannot be changed through a document-line update.", 400, "IMMUTABLE_SOURCE_ENTRIES");
+  }
+  if (Object.hasOwn(line, "taskName") && !compactText(line.taskName)) {
+    throw draftError("Task name is required.", 400, "TASK_NAME_REQUIRED");
+  }
+}
+
 function requestedTimeEntryIds(input = {}) {
   const values = Array.isArray(input.entryIds) ? input.entryIds : [input.entryId];
   return [...new Set(values.map((entryId) => compactText(entryId)).filter(Boolean))];
@@ -305,6 +342,9 @@ function savedQuoteLine(row = {}) {
 
 export const quoteDraftTestHooks = {
   activeLock,
+  applyMariaRoleRates,
+  applySnapshottedEntryRates,
+  assertEditableQuoteLinePatch,
   assertDraftMutation,
   draftLockKey,
   mapDocumentNumberConflict,
@@ -312,6 +352,7 @@ export const quoteDraftTestHooks = {
   quoteLineSourceSnapshot,
   requestedTimeEntryIds,
   savedQuoteLine,
+  validatedItemCode,
   xeroIdempotencyKey,
   xeroTransportFromLookup
 };
@@ -440,6 +481,19 @@ function toAnnualYear(value) {
   return year;
 }
 
+async function validatedItemCode(database, value) {
+  const itemCode = compactText(value);
+  if (!itemCode) return "";
+  const result = await database.query(
+    `select code from xero_items where code = $1 and is_sold = true limit 1`,
+    [itemCode]
+  );
+  if (!result.rowCount) {
+    throw draftError("Choose a valid Xero item code.", 400, "XERO_ITEM_CODE_INVALID");
+  }
+  return itemCode;
+}
+
 function roundMoney(value) {
   return Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
 }
@@ -484,6 +538,7 @@ function applyExistingLineSettings(preview, existingLines = [], services = []) {
       {
         comments: line.comments || "",
         discount: Number(line.discount || 0),
+        itemCode: line.itemCode || "",
         serviceId: line.serviceId || null
       }
     ])
@@ -501,6 +556,7 @@ function applyExistingLineSettings(preview, existingLines = [], services = []) {
       amount,
       comments: shouldUseSavedComment ? saved.comments : line.comments,
       discount: saved.discount,
+      itemCode: saved.itemCode,
       serviceId: saved.serviceId,
       serviceKey: service?.serviceKey || "",
       serviceLabel: service?.label || "Unmapped service"
@@ -538,6 +594,7 @@ async function insertQuoteLines(database, previewId, lines) {
           amount,
           is_billable,
           account_code,
+          item_code,
           tax_type,
           discount,
           annual_covered,
@@ -546,7 +603,7 @@ async function insertQuoteLines(database, previewId, lines) {
           warnings,
           source_snapshot
         )
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
         returning id
       `,
       [
@@ -563,6 +620,7 @@ async function insertQuoteLines(database, previewId, lines) {
         line.amount,
         line.isBillable,
         line.accountCode,
+        line.itemCode || "",
         line.taxType,
         line.discount,
         line.annualCovered,
@@ -685,6 +743,7 @@ function xeroUnitAmount({ discountRate, line, lineAmount, quantity }) {
 
 function buildXeroLineItem({ billingClient, line }) {
   const accountCode = compactText(line.accountCode || billingClient.accountCode || "70330001");
+  const itemCode = compactText(line.itemCode);
   const taxType = compactText(line.taxType || billingClient.taxType);
   const annualCovered = Boolean(line.annualCovered);
   const discountRate = annualCovered ? 0 : Number(line.discount || 0);
@@ -697,6 +756,7 @@ function buildXeroLineItem({ billingClient, line }) {
     AccountCode: accountCode,
     Description: description,
     DiscountRate: roundMoney(discountRate),
+    ...(itemCode ? { ItemCode: itemCode } : {}),
     LineAmount: roundMoney(lineAmount),
     Quantity: quantity,
     TaxType: taxType,
@@ -798,6 +858,82 @@ export function buildXeroQuotePayload({ billingClient, lines, previewRow }) {
     lines,
     previewRow
   });
+}
+
+export async function previewQuoteForXero(id, input = {}, actor = {}) {
+  const pool = getDatabasePool();
+  if (!pool) throw draftError("DATABASE_URL is not configured.", 503, "DATABASE_NOT_CONFIGURED");
+
+  const database = await pool.connect();
+  try {
+    await database.query("begin");
+    await acquireDraftTransactionLock(database, id);
+    const result = await database.query(
+      `select preview.id, preview.reference, preview.quote_number as "quoteNumber",
+              preview.quote_date::text as "quoteDate", preview.expiry_date::text as "expiryDate",
+              preview.status, preview.document_type as "documentType", preview.send_state as "sendState",
+              preview.version::int as version, preview.archived_at as "archivedAt",
+              preview.editing_by as "editingBy", preview.editing_session_id::text as "editingSessionId",
+              preview.editing_expires_at as "editingExpiresAt", editor.display_name as "editingByName",
+              client.id as "billingClientId", client.abbreviation, client.account_code as "accountCode",
+              client.currency, client.discount::float8 as discount, client.display_name as "displayName",
+              client.status as "clientStatus", client.tax_rate_name as "taxRateName",
+              client.tax_type as "taxType", client.teamwork_project_id as "teamworkProjectId",
+              client.xero_client_name as "xeroClientName", client.xero_contact_id as "xeroContactId"
+         from quote_previews preview
+         join billing_clients client on client.id = preview.billing_client_id
+         left join app_users editor on editor.id = preview.editing_by
+        where preview.id = $1
+        for update of preview`,
+      [id]
+    );
+    if (!result.rowCount) throw draftError("Document preview not found.", 404, "DRAFT_NOT_FOUND");
+
+    const previewRow = result.rows[0];
+    if (previewRow.status !== "preview") {
+      throw draftError("This document has already been sent or approved.", 409, "DRAFT_NOT_EDITABLE");
+    }
+    assertDraftMutation(previewRow, input, actor);
+    const documentType = xeroDocumentType(input.documentType || previewRow.documentType);
+    const billingClient = mapBillingClient({ ...previewRow, id: previewRow.billingClientId, status: previewRow.clientStatus });
+    if (!billingClient.xeroClientName || !billingClient.xeroContactId) {
+      throw draftError("Map this billing client to a Xero client before previewing.", 400, "XERO_CONTACT_REQUIRED");
+    }
+    if (!billingClient.taxType) {
+      throw draftError("Choose a Xero tax rate before previewing.", 400, "XERO_TAX_RATE_REQUIRED");
+    }
+    assertQuoteMetadata({ expiryDate: previewRow.expiryDate, quoteDate: previewRow.quoteDate });
+    assertXeroDocumentNumber(previewRow, documentType);
+
+    const linesResult = await database.query(
+        `select id, line_order as "lineOrder", source_time_entry_ids as "sourceTimeEntryIds",
+                task_name as "taskName", description, quantity_hours::float8 as "quantityHours",
+                unit_amount::float8 as "unitAmount", amount::float8 as amount,
+                is_billable as "isBillable", account_code as "accountCode", item_code as "itemCode", tax_type as "taxType",
+                discount::float8 as discount, annual_covered as "annualCovered",
+                include_in_xero as "includeInXero", comments
+           from quote_lines where quote_preview_id = $1 order by line_order, id`, [id]);
+    const contactResult = await database.query("select id, name, raw from xero_contacts where id = $1 limit 1", [billingClient.xeroContactId]);
+    const accountsResult = await database.query("select code, name from xero_accounts where coalesce(nullif(status, ''), 'ACTIVE') = 'ACTIVE'");
+    const taxRatesResult = await database.query("select tax_type as \"taxType\", name, rate::float8 as rate from xero_tax_rates");
+    const payload = buildXeroDocumentPayload({ billingClient, documentType, lines: linesResult.rows, previewRow });
+    if (!xeroPayloadLineItems(payload).length) {
+      throw draftError("There are no invoiceable lines to preview after excluding unbillable and pre-paid time.", 400, "NO_INVOICEABLE_LINES");
+    }
+    const document = buildXeroDocumentPreview({
+      accounts: accountsResult.rows,
+      contact: contactResult.rows[0] || null,
+      payload,
+      taxRates: taxRatesResult.rows
+    });
+    await database.query("commit");
+    return { document, validationWarnings: [], version: Number(previewRow.version) };
+  } catch (error) {
+    await database.query("rollback");
+    throw error;
+  } finally {
+    database.release();
+  }
 }
 
 function xeroPayloadLineItems(payload) {
@@ -943,6 +1079,7 @@ async function loadDraftPreview(database, id, { persistLegacySnapshots = false }
         line.discount::float8 as discount,
         line.amount::float8 as amount,
         line.account_code as "accountCode",
+        line.item_code as "itemCode",
         line.tax_type as "taxType",
         line.is_billable as "isBillable",
         line.annual_covered as "annualCovered",
@@ -967,6 +1104,7 @@ async function loadDraftPreview(database, id, { persistLegacySnapshots = false }
       billableOverrides.has(String(entry.id)) ? { ...entry, isBillable: billableOverrides.get(String(entry.id)) } : entry
     );
     entries = await backfillMissingTaskNames(database, entries);
+    entries = applySnapshottedEntryRates(entries, linesResult.rows);
     const serviceOverrides = await loadQuoteServiceOverrides(database, id);
     const annualUsage = await loadAnnualUsage(
       database,
@@ -1642,6 +1780,7 @@ export async function createQuotePreview({ billingClientId, documentType, editor
           client.currency,
           client.discount::float8 as discount,
           client.display_name as "displayName",
+          client.maria_role as "mariaRole",
           client.status,
           client.tax_rate_name as "taxRateName",
           client.tax_type as "taxType",
@@ -1725,7 +1864,10 @@ export async function createQuotePreview({ billingClientId, documentType, editor
       [billingClient.id]
     );
 
-    const entries = await backfillMissingTaskNames(database, entriesResult.rows.map(mapEntry));
+    const entries = applyMariaRoleRates(
+      await backfillMissingTaskNames(database, entriesResult.rows.map(mapEntry)),
+      billingClient
+    );
     const services = servicesResult.rows.map(mapService);
     const annualUsage = await loadAnnualUsage(database, billingClient.id, startDate, endDate, entries);
     const preview = buildAggregatedQuotePreview({
@@ -1918,6 +2060,7 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
     const lineUpdates = Array.isArray(input.lines) ? input.lines : [];
     const serviceOverrideEvents = [];
     const insertedManualLinesForResponse = [];
+    let removedLineCount = 0;
     for (const line of lineUpdates) {
       if (!line) continue;
 
@@ -1946,6 +2089,7 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
           discount,
           includeInXero: quantityHours > 0 && unitAmount > 0,
           isBillable: true,
+          itemCode: await validatedItemCode(database, line.itemCode),
           lineOrder: 0,
           quantityHours,
           serviceId,
@@ -1956,16 +2100,6 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
           unitAmount,
           warnings: []
         };
-
-        const orderResult = await database.query(
-          `
-            select coalesce(max(line_order), 0)::int + 1 as "lineOrder"
-            from quote_lines
-            where quote_preview_id = $1
-          `,
-          [id]
-        );
-        const firstLineOrder = Number(orderResult.rows[0]?.lineOrder || 1);
 
         const billingClient = mapBillingClient({
           ...currentPreview,
@@ -1994,6 +2128,15 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
             service
           })
           : [{ annualCoverage: null, annualOverflow: null, hours: quantityHours, prepaidAppliedHours: 0 }];
+        await database.query(
+          `
+            update quote_lines
+            set line_order = line_order + $2
+            where quote_preview_id = $1
+          `,
+          [id, parts.length]
+        );
+        const firstLineOrder = 1;
         const manualLines = parts.map((part, index) => {
           const partHours = roundHours(part.hours || 0);
           const annualCovered = Boolean(part.annualCoverage);
@@ -2042,6 +2185,26 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
         continue;
       }
 
+      if (line.remove === true) {
+        assertEditableQuoteLinePatch(line);
+        const removedLineResult = await database.query(
+          `
+            delete from quote_lines
+            where id = $1
+              and quote_preview_id = $2
+            returning id
+          `,
+          [line.id, id]
+        );
+        if (!removedLineResult.rowCount) {
+          const error = new Error("Document line not found.");
+          error.statusCode = 404;
+          throw error;
+        }
+        removedLineCount += 1;
+        continue;
+      }
+
       const lineResult = await database.query(
         `
           select
@@ -2055,6 +2218,7 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
             unit_amount::float8 as "unitAmount",
             amount::float8 as amount,
             account_code as "accountCode",
+            item_code as "itemCode",
             tax_type as "taxType",
             discount::float8 as discount,
             include_in_xero as "includeInXero",
@@ -2076,6 +2240,7 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
       }
 
       const currentLine = lineResult.rows[0];
+      assertEditableQuoteLinePatch(line);
       const discount = Object.hasOwn(line, "discount") ? toDiscount(line.discount) : Number(currentLine.discount || 0);
       const serviceId = Object.hasOwn(line, "serviceId") ? compactText(line.serviceId) || null : currentLine.serviceId;
       const annualYear = serviceId && Object.hasOwn(line, "annualYear") ? toAnnualYear(line.annualYear) : serviceId ? currentLine.annualYear : null;
@@ -2103,11 +2268,14 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
         comments: Object.hasOwn(line, "comments") ? String(line.comments || "").trim() : currentLine.comments,
         description: Object.hasOwn(line, "description") ? String(line.description || "").trim() : currentLine.description,
         discount,
+        itemCode: Object.hasOwn(line, "itemCode")
+          ? await validatedItemCode(database, line.itemCode)
+          : currentLine.itemCode,
         quantityHours: Object.hasOwn(line, "quantityHours")
           ? roundHours(toEditableNumber(line.quantityHours, "Hours"))
           : Number(currentLine.quantityHours || 0),
         serviceId,
-        taskName: Object.hasOwn(line, "taskName") ? String(line.taskName || "").trim() : currentLine.taskName,
+        taskName: Object.hasOwn(line, "taskName") ? compactText(line.taskName) : currentLine.taskName,
         taxType: Object.hasOwn(line, "taxType") ? compactText(line.taxType) : currentLine.taxType,
         unitAmount: Object.hasOwn(line, "unitAmount")
           ? roundMoney(toEditableNumber(line.unitAmount, "Rate"))
@@ -2131,11 +2299,12 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
             discount = $7,
             amount = $8,
             account_code = $9,
-            tax_type = $10,
-            comments = $11,
-            include_in_xero = $12,
-            service_id = $13,
-            annual_year = $14,
+            item_code = $10,
+            tax_type = $11,
+            comments = $12,
+            include_in_xero = $13,
+            service_id = $14,
+            annual_year = $15,
             updated_at = now()
           where id = $1
             and quote_preview_id = $2
@@ -2150,6 +2319,7 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
           discount,
           amount,
           nextLine.accountCode,
+          nextLine.itemCode,
           nextLine.taxType,
           nextLine.comments,
           includeInXero,
@@ -2196,6 +2366,7 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
             description,
             service_id as "serviceId",
             account_code as "accountCode",
+            item_code as "itemCode",
             tax_type as "taxType",
             quantity_hours::float8 as "quantityHours",
             unit_amount::float8 as "unitAmount",
@@ -2205,7 +2376,8 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
             is_billable as "isBillable",
             discount::float8 as discount,
             warnings,
-            comments
+            comments,
+            source_snapshot as "sourceSnapshot"
           from quote_lines
           where quote_preview_id = $1
           order by line_order, id
@@ -2221,6 +2393,7 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
           : entry
       );
       entries = await backfillMissingTaskNames(database, entries);
+      entries = applySnapshottedEntryRates(entries, existingLinesResult.rows);
 
       const serviceOverrides = await loadQuoteServiceOverrides(database, id);
       const annualUsage = await loadAnnualUsage(
@@ -2256,7 +2429,8 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
           discount: Number(line.discount || 0),
           includeInXero: line.includeInXero !== false,
           isBillable: line.isBillable !== false,
-          lineOrder: preview.lines.length + index + 1,
+          itemCode: line.itemCode || "",
+          lineOrder: index + 1,
           quantityHours: Number(line.quantityHours || 0),
           serviceId: line.serviceId || null,
           sourceTimeEntryIds: sourceTimeEntryIds(line.sourceTimeEntryIds),
@@ -2267,7 +2441,7 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
           warnings: line.warnings || []
         }));
       if (manualLines.length) {
-        preview.lines = [...preview.lines, ...manualLines];
+        preview.lines = [...manualLines, ...preview.lines].map((line, index) => ({ ...line, lineOrder: index + 1 }));
         preview.totals = {
           ...preview.totals,
           amount: roundMoney(preview.lines.reduce((sum, line) => sum + Number(line.amount || 0), 0)),
@@ -2392,6 +2566,7 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
           line.discount::float8 as discount,
           line.amount::float8 as amount,
           line.account_code as "accountCode",
+          line.item_code as "itemCode",
           line.tax_type as "taxType",
           line.is_billable as "isBillable",
           line.annual_covered as "annualCovered",
@@ -2418,6 +2593,7 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
       preview: {
         ...previewResult.rows[0],
         lines: responseLines,
+        replaceLines: removedLineCount > 0,
         services
       }
     };
@@ -2520,10 +2696,12 @@ export async function updateQuotePreviewTimeEntryBillable(id, input = {}, actor 
           task_name as "taskName",
           description,
           service_id as "serviceId",
+          item_code as "itemCode",
           annual_covered as "annualCovered",
           is_billable as "isBillable",
           discount::float8 as discount,
-          comments
+          comments,
+          source_snapshot as "sourceSnapshot"
         from quote_lines
         where quote_preview_id = $1
       `,
@@ -2603,6 +2781,7 @@ export async function updateQuotePreviewTimeEntryBillable(id, input = {}, actor 
         : entry
     );
     entries = await backfillMissingTaskNames(database, entries);
+    entries = applySnapshottedEntryRates(entries, existingLinesResult.rows);
 
     const services = servicesResult.rows.map(mapService);
     const serviceOverrides = await loadQuoteServiceOverrides(database, id);
@@ -2833,6 +3012,7 @@ export async function sendQuotePreviewToXero(id, input = {}, actor = {}, interna
           amount::float8 as amount,
           is_billable as "isBillable",
           account_code as "accountCode",
+          item_code as "itemCode",
           tax_type as "taxType",
           discount::float8 as discount,
           annual_covered as "annualCovered",

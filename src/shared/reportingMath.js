@@ -81,7 +81,8 @@ export function buildReport({
   startDate,
   endDate,
   currency = "EUR",
-  excludedProjectIds = []
+  excludedProjectIds = [],
+  mariaRatePolicy = {}
 }) {
   const usersById = new Map(users.map((user) => [String(user.id), user]));
   const projectsById = new Map(projects.map((project) => [String(project.id), project]));
@@ -101,6 +102,13 @@ export function buildReport({
   const unknownUsers = new Set();
   const unknownProjects = new Set();
   const includedEntries = [];
+  const effectiveRate = (user, entry) => effectiveRateForEntry({
+    defaultRate: Number(user?.userRate || 0),
+    mariaRolesByProject: mariaRatePolicy.rolesByProject || {},
+    mariaTeamworkUserId: mariaRatePolicy.userId || "",
+    projectId: entry?.projectId || "",
+    userId: user?.id || entry?.userId || ""
+  });
 
   for (const entry of timeEntries) {
     const user = usersById.get(String(entry.userId));
@@ -110,7 +118,7 @@ export function buildReport({
     if (project && filteredPersonProjectIds.has(String(project.id))) continue;
 
     if (entry.date?.startsWith(`${year}-`) && user && project) {
-      addTotals(yearTrend.get(entry.date.slice(0, 7)), entry, Number(user.userRate || 0));
+      addTotals(yearTrend.get(entry.date.slice(0, 7)), entry, effectiveRate(user, entry));
     }
 
     if (!dateInRange(entry.date, startDate, endDate)) continue;
@@ -119,7 +127,7 @@ export function buildReport({
     if (!project) unknownProjects.add(entry.projectId || "unknown");
     if (!user || !project) continue;
 
-    const userRate = Number(user.userRate || 0);
+    const userRate = effectiveRate(user, entry);
     if (entry.isBillable && userRate <= 0) missingRateIds.add(user.id);
 
     addTotals(totals, entry, userRate);
@@ -221,6 +229,11 @@ export function buildReport({
       excludedProjects: excludedProjects.map((project) => ({ id: project.id, name: project.name })),
       filteredPersonProjects: filteredPersonProjects.map((project) => ({ id: project.id, name: project.name })),
       missingRates: [...missingRateIds].map((id) => usersById.get(id)).filter(Boolean),
+      rateWarnings: mariaRatePolicy.expected && !mariaRatePolicy.userId
+        ? ["Maria's Teamwork user ID is not configured; her stored Teamwork rate was used."]
+        : mariaRatePolicy.expected && !usersById.has(String(mariaRatePolicy.userId))
+          ? ["Maria's configured Teamwork user ID was not found; her stored Teamwork rate was used."]
+          : [],
       unknownProjects: [...unknownProjects],
       unknownUsers: [...unknownUsers]
     },
@@ -232,3 +245,4 @@ export function buildReport({
     yearTrend: yearTrendRows.map((row) => ({ ...row, ...finalizeTotals(row) }))
   };
 }
+import { effectiveRateForEntry } from "./mariaRoleRates.js";

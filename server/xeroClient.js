@@ -566,7 +566,7 @@ export async function fetchXeroReferenceData() {
   });
   if (contacts.mode !== "live") return contacts;
 
-  const [taxRates, accounts] = await Promise.all([
+  const [taxRates, accounts, items] = await Promise.all([
     fetchXeroCollection({
       collectionKey: "TaxRates",
       endpoint: "/TaxRates"
@@ -574,17 +574,24 @@ export async function fetchXeroReferenceData() {
     fetchXeroCollection({
       collectionKey: "Accounts",
       endpoint: "/Accounts"
+    }),
+    fetchXeroCollection({
+      collectionKey: "Items",
+      endpoint: "/Items",
+      paged: true
     })
   ]);
 
   return {
     connected: true,
     contacts: contacts.items,
+    items: items.mode === "live" ? items.items : [],
     mode: "live",
     accounts: accounts.mode === "live" ? accounts.items : [],
     payload: {
       Accounts: accounts.mode === "live" ? accounts.items : [],
       Contacts: contacts.items,
+      Items: items.mode === "live" ? items.items : [],
       TaxRates: taxRates.mode === "live" ? taxRates.items : []
     },
     status: "fetched",

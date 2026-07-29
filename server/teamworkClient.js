@@ -38,7 +38,7 @@ function retryDelay(response, attempt) {
   return Math.min(6000, 600 * 2 ** attempt);
 }
 
-async function requestJson(path, params = {}, attempt = 0, baseUrl = activeBaseUrl) {
+async function requestJson(path, params = {}, attempt = 0, baseUrl = activeBaseUrl, request = {}) {
   const candidates = baseUrl
     ? [baseUrl]
     : [...new Set([activeBaseUrl, ...config.teamworkBaseUrls].filter(Boolean))];
@@ -48,11 +48,17 @@ async function requestJson(path, params = {}, attempt = 0, baseUrl = activeBaseU
   for (const candidate of candidates) {
     const url = buildUrl(candidate, path, params);
     try {
-      const response = await fetch(url, { headers: makeHeaders() });
+      const headers = makeHeaders();
+      if (request.body !== undefined) headers["Content-Type"] = "application/json";
+      const response = await fetch(url, {
+        body: request.body === undefined ? undefined : JSON.stringify(request.body),
+        headers,
+        method: request.method || "GET"
+      });
 
       if ((response.status === 429 || response.status >= 500) && attempt < 4) {
         await sleep(retryDelay(response, attempt));
-        return requestJson(path, params, attempt + 1, candidate);
+        return requestJson(path, params, attempt + 1, candidate, request);
       }
 
       if (!response.ok) {
@@ -175,6 +181,49 @@ export async function fetchTimeEntries(startDate, endDate) {
 export async function fetchTask(taskId) {
   const response = await requestJson(`/projects/api/v3/tasks/${encodeURIComponent(taskId)}.json`);
   return response.body?.task || response.body?.todoItem || response.body?.data || response.body;
+}
+
+export function buildTimeEntryBillableUpdate(isBillable) {
+  return {
+    timelog: {
+      isBillable: Boolean(isBillable)
+    }
+  };
+}
+
+export async function updateTimeEntryBillable(entryId, isBillable) {
+  const normalizedId = String(entryId || "").trim();
+  if (!normalizedId) throw new Error("A Teamwork time entry ID is required.");
+  const response = await requestJson(
+    `/projects/api/v3/time/${encodeURIComponent(normalizedId)}.json`,
+    {},
+    0,
+    activeBaseUrl,
+    {
+      body: buildTimeEntryBillableUpdate(isBillable),
+      method: "PATCH"
+    }
+  );
+  return response.body;
+}
+
+export async function updateTimeEntriesBillable(entryIds, isBillable) {
+  const updatedEntryIds = [];
+  const failures = [];
+
+  for (const entryId of [...new Set((entryIds || []).map((value) => String(value || "").trim()).filter(Boolean))]) {
+    try {
+      await updateTimeEntryBillable(entryId, isBillable);
+      updatedEntryIds.push(entryId);
+    } catch (error) {
+      failures.push({
+        entryId,
+        message: String(error?.message || "Teamwork update failed.").slice(0, 500)
+      });
+    }
+  }
+
+  return { failures, updatedEntryIds };
 }
 
 export function getTeamworkStatus() {

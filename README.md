@@ -1,5 +1,7 @@
 # Ziffer Billing System
 
+Release notes are maintained in [CHANGELOG.md](CHANGELOG.md). Version selection and release preparation are documented in [VERSIONING.md](VERSIONING.md).
+
 Local reporting dashboard for stored Teamwork time entries, internal people, projects, billable hours, and calculated EUR amounts.
 
 ## Local Setup

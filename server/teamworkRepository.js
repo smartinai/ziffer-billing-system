@@ -481,6 +481,31 @@ export async function persistTeamworkStoreToDatabase(store, raw = {}, options = 
   }
 }
 
+export async function updateStoredTimeEntriesBillable(entryIds, isBillable) {
+  const normalizedIds = [...new Set((entryIds || []).map((value) => String(value || "").trim()).filter(Boolean))];
+  if (!normalizedIds.length) return 0;
+
+  const pool = getDatabasePool();
+  if (!pool) return 0;
+  const result = await pool.query(
+    `
+      update teamwork_time_entries
+      set
+        is_billable = $2,
+        raw = jsonb_set(
+          jsonb_set(coalesce(raw, '{}'::jsonb), '{isBillable}', to_jsonb($2::boolean), true),
+          '{billable}',
+          to_jsonb($2::boolean),
+          true
+        ),
+        updated_at = now()
+      where id = any($1::text[])
+    `,
+    [normalizedIds, Boolean(isBillable)]
+  );
+  return result.rowCount;
+}
+
 export async function readTeamworkStoreFromDatabase() {
   if (!isDatabaseConfigured()) return null;
 

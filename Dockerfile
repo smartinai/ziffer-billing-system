@@ -7,6 +7,8 @@ RUN npm ci
 FROM deps AS build
 
 WORKDIR /app
+ARG APP_COMMIT_SHA=unknown
+ENV APP_COMMIT_SHA=$APP_COMMIT_SHA
 COPY . .
 RUN npm run build
 RUN npm prune --omit=dev
@@ -14,8 +16,10 @@ RUN npm prune --omit=dev
 FROM node:22-alpine AS runtime
 
 WORKDIR /app
+ARG APP_COMMIT_SHA=unknown
 ENV NODE_ENV=production
 ENV PORT=3000
+ENV APP_COMMIT_SHA=$APP_COMMIT_SHA
 
 COPY --from=build /app/package*.json ./
 COPY --from=build /app/node_modules ./node_modules

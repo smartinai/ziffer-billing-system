@@ -1,5 +1,6 @@
 import { config } from "./config.js";
 import { isDatabaseConfigured, query } from "./db.js";
+import { normalizeMariaRole } from "../src/shared/mariaRoleRates.js";
 
 const clientStatuses = new Set(["active", "inactive", "excluded"]);
 
@@ -26,6 +27,7 @@ function clientRow(row) {
     discount: Number(row.discount || 0),
     displayName: row.display_name || "",
     id: row.id,
+    mariaRole: normalizeMariaRole(row.maria_role),
     settings: row.settings || {},
     taxRateName: row.tax_rate_name || "",
     taxType: row.tax_type || "",
@@ -123,12 +125,20 @@ async function getBillingClientById(id) {
 }
 
 export async function updateBillingClient(id, input = {}) {
+  const requestedMariaRole = String(input.mariaRole || "standard").trim().toLowerCase();
+  if (!["director", "standard"].includes(requestedMariaRole)) {
+    const error = new Error("Maria's role must be Director or Standard.");
+    error.statusCode = 400;
+    throw error;
+  }
+
   const fields = {
     abbreviation: String(input.abbreviation || "").trim(),
     account_code: String(input.accountCode || "70330001").trim() || "70330001",
     currency: String(input.currency || config.currency).trim() || config.currency,
     discount: toNumber(input.discount),
     display_name: String(input.displayName || "").trim(),
+    maria_role: requestedMariaRole,
     status: normalizeStatus(input.status, input.active === false ? "inactive" : "active"),
     tax_rate_name: String(input.taxRateName || "").trim(),
     tax_type: String(input.taxType || "").trim(),
@@ -151,11 +161,12 @@ export async function updateBillingClient(id, input = {}) {
         currency = $5,
         discount = $6,
         display_name = $7,
-        tax_rate_name = $8,
-        tax_type = $9,
-        xero_client_name = $10,
-        xero_contact_id = $11,
-        status = $12,
+        maria_role = $8,
+        tax_rate_name = $9,
+        tax_type = $10,
+        xero_client_name = $11,
+        xero_contact_id = $12,
+        status = $13,
         updated_at = now()
       where id = $1
     `,
@@ -167,6 +178,7 @@ export async function updateBillingClient(id, input = {}) {
       fields.currency,
       fields.discount,
       fields.display_name,
+      fields.maria_role,
       fields.tax_rate_name,
       fields.tax_type,
       fields.xero_client_name,
@@ -196,4 +208,33 @@ export async function listExcludedTeamworkProjectIds() {
   `);
 
   return result.rows.map((row) => String(row.teamwork_project_id));
+}
+
+export async function listMariaRolesByTeamworkProjectId() {
+  if (!isDatabaseConfigured()) return new Map();
+
+  const result = await query(`
+    select teamwork_project_id, maria_role
+    from billing_clients
+    where teamwork_project_id is not null
+  `);
+
+  return new Map(result.rows.map((row) => [
+    String(row.teamwork_project_id),
+    normalizeMariaRole(row.maria_role)
+  ]));
+}
+
+export async function listTeamworkProjectDisplayNames() {
+  if (!isDatabaseConfigured()) return new Map();
+
+  const result = await query(`
+    select teamwork_project_id, display_name
+    from billing_clients
+    where teamwork_project_id is not null
+      and teamwork_project_id <> ''
+      and display_name <> ''
+  `);
+
+  return new Map(result.rows.map((row) => [String(row.teamwork_project_id), String(row.display_name)]));
 }

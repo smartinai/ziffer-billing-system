@@ -129,7 +129,7 @@ export async function loginHandler(req, res) {
     action: "login",
     actor: user,
     entityType: "auth",
-    metadata: { summary: `${user.email} logged in` }
+    metadata: { summary: `${user.displayName || user.name || user.email} logged in` }
   });
 
   return res.json({ authenticated: true, user });

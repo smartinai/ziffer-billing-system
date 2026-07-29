@@ -1,6 +1,10 @@
 import { buildReport } from "../src/shared/reportingMath.js";
 import { config } from "./config.js";
-import { listExcludedTeamworkProjectIds } from "./billingClientRepository.js";
+import {
+  listExcludedTeamworkProjectIds,
+  listMariaRolesByTeamworkProjectId,
+  listTeamworkProjectDisplayNames
+} from "./billingClientRepository.js";
 import { normalizeProjects, normalizeTimeEntries, normalizeUsers } from "./normalizers.js";
 import { listReportingDocumentAggregates } from "./reportingDocumentAggregateRepository.js";
 import { fetchProjects, fetchTimeEntries, fetchUsers, getTeamworkStatus } from "./teamworkClient.js";
@@ -43,6 +47,13 @@ function today() {
 }
 
 function syncRange({ checkpoint, endDate, mode, startDate }) {
+  if (mode === "reconcile") {
+    return {
+      coverageStart: `${String(endDate).slice(0, 4)}-01-01`,
+      fetchEnd: endDate,
+      fetchStart: `${String(endDate).slice(0, 4)}-01-01`
+    };
+  }
   if (mode !== "incremental") {
     const fetchStart = startDate || config.defaultStartDate;
     return { coverageStart: fetchStart, fetchEnd: endDate, fetchStart };
@@ -52,6 +63,50 @@ function syncRange({ checkpoint, endDate, mode, startDate }) {
     coverageStart: checkpoint?.coverageStart || config.defaultStartDate,
     fetchEnd: endDate,
     fetchStart: checkpoint?.coverageEnd || config.defaultStartDate
+  };
+}
+
+function monthWindows(startDate, endDate) {
+  const windows = [];
+  let cursor = new Date(`${startDate}T12:00:00Z`);
+  const finalDate = new Date(`${endDate}T12:00:00Z`);
+  while (cursor <= finalDate) {
+    const year = cursor.getUTCFullYear();
+    const month = cursor.getUTCMonth();
+    const monthEnd = new Date(Date.UTC(year, month + 1, 0, 12));
+    windows.push({
+      startDate: cursor.toISOString().slice(0, 10),
+      endDate: (monthEnd < finalDate ? monthEnd : finalDate).toISOString().slice(0, 10)
+    });
+    cursor = new Date(Date.UTC(year, month + 1, 1, 12));
+  }
+  return windows;
+}
+
+async function fetchReconciliationData(startDate, endDate) {
+  const responses = [];
+  const pause = () => new Promise((resolve) => setTimeout(resolve, Math.max(0, config.pageDelayMs)));
+  const usersResponse = await fetchUsers();
+  responses.push(usersResponse.metadata);
+  await pause();
+  const projectsResponse = await fetchProjects();
+  responses.push(projectsResponse.metadata);
+  await pause();
+  const timeRows = [];
+  const timeRawRows = [];
+  for (const window of monthWindows(startDate, endDate)) {
+    await pause();
+    const response = await fetchTimeEntries(window.startDate, window.endDate);
+    responses.push(response.metadata);
+    timeRows.push(...response.rows);
+    timeRawRows.push(...response.rows);
+  }
+
+  return {
+    api: mergeMetadata(responses),
+    projectsResponse,
+    timeResponse: { rows: timeRows, rawRows: timeRawRows },
+    usersResponse
   };
 }
 
@@ -66,9 +121,17 @@ function mergeIncrementalStore(existing, delta) {
     ...existing,
     ...delta,
     projects: mergeRowsById(existing?.projects, delta.projects),
+    tags: mergeRowsById(existing?.tags, delta.tags),
     timeEntries: mergeRowsById(existing?.timeEntries, delta.timeEntries),
     users: mergeRowsById(existing?.users, delta.users)
   };
+}
+
+function applyProjectDisplayNames(projects = [], displayNames = new Map()) {
+  return projects.map((project) => ({
+    ...project,
+    name: displayNames.get(String(project.id)) || project.name
+  }));
 }
 
 function publicSyncError(error) {
@@ -210,7 +273,7 @@ async function ensureStoredData() {
 }
 
 export async function syncTeamworkStore(options = {}) {
-  const mode = options.mode === "incremental" ? "incremental" : "full";
+  const mode = options.mode === "incremental" || options.mode === "reconcile" ? options.mode : "full";
   const trigger = options.trigger || "manual";
   const attempt = Math.max(1, Number(options.attempt || 1));
   const coverageEnd = options.endDate || today();
@@ -263,15 +326,23 @@ export async function syncTeamworkStore(options = {}) {
       trigger
     });
 
-    const responses = await Promise.allSettled([
-      fetchUsers(),
-      fetchProjects(),
-      fetchTimeEntries(range.fetchStart, range.fetchEnd)
-    ]);
-    const failedResponse = responses.find((response) => response.status === "rejected");
-    if (failedResponse) throw failedResponse.reason;
-    const [usersResponse, projectsResponse, timeResponse] = responses.map((response) => response.value);
-    const api = mergeMetadata([usersResponse.metadata, projectsResponse.metadata, timeResponse.metadata]);
+    let usersResponse;
+    let projectsResponse;
+    let timeResponse;
+    let api;
+    if (mode === "reconcile") {
+      ({ api, projectsResponse, timeResponse, usersResponse } = await fetchReconciliationData(range.fetchStart, range.fetchEnd));
+    } else {
+      const responses = await Promise.allSettled([
+        fetchUsers(),
+        fetchProjects(),
+        fetchTimeEntries(range.fetchStart, range.fetchEnd)
+      ]);
+      const failedResponse = responses.find((response) => response.status === "rejected");
+      if (failedResponse) throw failedResponse.reason;
+      [usersResponse, projectsResponse, timeResponse] = responses.map((response) => response.value);
+      api = mergeMetadata([usersResponse.metadata, projectsResponse.metadata, timeResponse.metadata]);
+    }
     if (api.partial) {
       const error = new Error("Teamwork returned a partial response.");
       error.code = "TEAMWORK_SYNC_PARTIAL";
@@ -339,19 +410,36 @@ export async function runIncrementalTeamworkSync(options = {}) {
   return syncTeamworkStore({ ...options, mode: "incremental", trigger: options.trigger || "scheduled" });
 }
 
+export async function runYearToDateTeamworkReconciliation(options = {}) {
+  return syncTeamworkStore({ ...options, mode: "reconcile", trigger: options.trigger || "scheduled" });
+}
+
 async function buildStoredReport(store, startDate, endDate) {
   let excludedProjectIds = [];
+  let mariaRolesByProject = new Map();
+  let projectDisplayNames = new Map();
   try {
-    excludedProjectIds = await listExcludedTeamworkProjectIds();
+    [excludedProjectIds, mariaRolesByProject, projectDisplayNames] = await Promise.all([
+      listExcludedTeamworkProjectIds(),
+      listMariaRolesByTeamworkProjectId(),
+      listTeamworkProjectDisplayNames()
+    ]);
   } catch (error) {
-    console.error(`Could not load excluded billing clients: ${error.message}`);
+    console.error(`Could not load billing client reporting settings: ${error.message}`);
   }
+
+  const reportingProjects = applyProjectDisplayNames(store.projects || [], projectDisplayNames);
 
   let report = buildReport({
     currency: config.currency,
     endDate,
     excludedProjectIds,
-    projects: store.projects || [],
+    mariaRatePolicy: {
+      expected: true,
+      rolesByProject: mariaRolesByProject,
+      userId: config.mariaTeamworkUserId
+    },
+    projects: reportingProjects,
     startDate,
     timeEntries: store.timeEntries || [],
     users: store.users || []
@@ -424,8 +512,10 @@ export async function getSourceStatus() {
 }
 
 export const reportingServiceTestHooks = {
+  applyProjectDisplayNames,
   dateInTimezone,
   mergeIncrementalStore,
+  monthWindows,
   publicSyncError,
   syncRange
 };

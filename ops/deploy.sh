@@ -43,7 +43,7 @@ trap failure EXIT INT TERM
 
 sh "$APP_DIR/ops/backup-predeploy.sh"
 git checkout --detach "$target_sha"
-docker build --label ziffer.release=true --label "ziffer.commit=$target_sha" -t "$target_image" .
+docker build --build-arg "APP_COMMIT_SHA=$target_sha" --label ziffer.release=true --label "ziffer.commit=$target_sha" -t "$target_image" .
 
 APP_IMAGE="$target_image" docker compose -f "$COMPOSE_FILE" run --rm --no-deps -e NODE_ENV=test app npm test
 sh "$APP_DIR/ops/migration-preflight.sh" "$target_image"

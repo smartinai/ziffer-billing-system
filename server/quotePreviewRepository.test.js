@@ -1,6 +1,59 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildXeroDocumentPayload, buildXeroQuotePayload } from "./quotePreviewRepository.js";
+import { buildXeroDocumentPayload, buildXeroQuotePayload, quoteDraftTestHooks } from "./quotePreviewRepository.js";
+
+test("allows task-level edits while protecting source time entries", () => {
+  assert.doesNotThrow(() => quoteDraftTestHooks.assertEditableQuoteLinePatch({
+    discount: 10,
+    id: "line-1",
+    itemCode: "4-102",
+    quantityHours: 1.25,
+    taskName: "Updated task",
+    unitAmount: 300
+  }));
+  assert.throws(
+    () => quoteDraftTestHooks.assertEditableQuoteLinePatch({ id: "line-1", entries: [{ id: "entry-1", hours: 2 }] }),
+    (error) => error.code === "IMMUTABLE_SOURCE_ENTRIES" && error.statusCode === 400
+  );
+  assert.throws(
+    () => quoteDraftTestHooks.assertEditableQuoteLinePatch({ id: "line-1", taskName: "  " }),
+    (error) => error.code === "TASK_NAME_REQUIRED" && error.statusCode === 400
+  );
+});
+
+test("applies Maria's role to new drafts and preserves snapshot rates afterward", () => {
+  const entries = [
+    { id: "maria-entry", userId: "maria", userRate: 100 },
+    { id: "other-entry", userId: "other", userRate: 225 }
+  ];
+  const directorEntries = quoteDraftTestHooks.applyMariaRoleRates(entries, { mariaRole: "director" }, "maria");
+  const standardEntries = quoteDraftTestHooks.applyMariaRoleRates(entries, { mariaRole: "standard" }, "maria");
+
+  assert.equal(directorEntries[0].userRate, 300);
+  assert.equal(standardEntries[0].userRate, 750);
+  assert.equal(directorEntries[1].userRate, 225);
+
+  const restored = quoteDraftTestHooks.applySnapshottedEntryRates(
+    [{ id: "maria-entry", userId: "maria", userRate: 750 }],
+    [{ sourceSnapshot: { entries: [{ id: "maria-entry", userRate: 300 }] } }]
+  );
+  assert.equal(restored[0].userRate, 300);
+});
+
+test("validates Xero item codes before saving them on a draft line", async () => {
+  const database = {
+    async query(_sql, [code]) {
+      return { rowCount: code === "4-102" ? 1 : 0 };
+    }
+  };
+
+  assert.equal(await quoteDraftTestHooks.validatedItemCode(database, ""), "");
+  assert.equal(await quoteDraftTestHooks.validatedItemCode(database, " 4-102 "), "4-102");
+  await assert.rejects(
+    quoteDraftTestHooks.validatedItemCode(database, "not-an-item"),
+    (error) => error.code === "XERO_ITEM_CODE_INVALID" && error.statusCode === 400
+  );
+});
 
 test("builds the Xero quote create payload with accounting fields", () => {
   const payload = buildXeroQuotePayload({
@@ -20,6 +73,7 @@ test("builds the Xero quote create payload with accounting fields", () => {
         comments: "Reviewed by billing",
         discount: 10,
         id: "line-1",
+        itemCode: "4-102",
         isBillable: true,
         quantityHours: 3,
         sourceTimeEntryIds: ["entry-1", "entry-2"],
@@ -89,6 +143,7 @@ test("builds the Xero quote create payload with accounting fields", () => {
     AccountCode: "705000",
     Description: "Task A Reviewed by billing",
     DiscountRate: 10,
+    ItemCode: "4-102",
     LineAmount: 900,
     Quantity: 3,
     TaxType: "OUTPUT2",
