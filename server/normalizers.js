@@ -127,6 +127,24 @@ function readTaskName(row) {
   return textValue(row.taskName || row.task || row.todoItemName || row.todoItem || row.todoItemTitle);
 }
 
+function taskTitle(row) {
+  return textValue(row?.name || row?.title || row?.content || row?.todoItemName);
+}
+
+export function enrichTimeEntriesWithTasks(rows = [], tasks = []) {
+  const titlesById = new Map(
+    tasks
+      .map((task) => [String(task?.id || ""), taskTitle(task)])
+      .filter(([id, title]) => id && title)
+  );
+
+  return rows.map((row) => {
+    if (readTaskName(row)) return row;
+    const title = titlesById.get(readTaskId(row));
+    return title ? { ...row, taskName: title } : row;
+  });
+}
+
 function readInvoiceId(row) {
   return idValue(
       row.invoiceId ??

@@ -1,4 +1,5 @@
 import { getDatabasePool } from "./db.js";
+import { parseMaintainCorporateRecordsPeriod } from "../src/shared/annualServicePeriods.js";
 
 const defaultYears = [2025, 2026];
 
@@ -25,8 +26,10 @@ function toOptionalHours(value, label) {
 
 function mapService(row) {
   return {
+    defaultMaxHours: row.defaultMaxHours === null || row.defaultMaxHours === undefined ? null : Number(row.defaultMaxHours),
     id: row.id,
     label: row.label,
+    periodBased: row.serviceKey === "maintain_corporate_records",
     serviceKey: row.serviceKey
   };
 }
@@ -44,6 +47,9 @@ function mapUsage(row) {
     annualHours: row.maxHours === null || row.maxHours === undefined ? "" : Number(row.maxHours),
     billingClientId: row.billingClientId,
     clientName: row.sourceClientName || "",
+    coverageEnd: row.coverageEnd || "",
+    coverageStart: row.coverageStart || "",
+    periodSource: row.periodSource || "",
     serviceId: row.serviceId,
     serviceName: row.sourceServiceName || "",
     usageId: row.id,
@@ -66,7 +72,7 @@ export async function listAnnualInvoices(inputYear) {
   const pool = await requirePool();
   const selectedYear = inputYear ? toYear(inputYear) : defaultYears[defaultYears.length - 1];
 
-  const [yearsResult, clientsResult, servicesResult, usageResult] = await Promise.all([
+  const [yearsResult, clientsResult, servicesResult, usageResult, corporateTasksResult] = await Promise.all([
     pool.query(
       `
         select distinct for_year::int as year
@@ -89,13 +95,15 @@ export async function listAnnualInvoices(inputYear) {
     pool.query(
       `
         select
-          id,
-          service_key as "serviceKey",
-          label
-        from standard_services
-        where active = true
-          and annual_invoice_eligible = true
-        order by sort_order, lower(label)
+          service.id,
+          service.service_key as "serviceKey",
+          service.label,
+          annual.default_max_hours::float8 as "defaultMaxHours"
+        from standard_services service
+        left join annual_invoice_services annual on annual.service_id = service.id and annual.active = true
+        where service.active = true
+          and service.annual_invoice_eligible = true
+        order by service.sort_order, lower(service.label)
       `
     ),
     pool.query(
@@ -106,12 +114,34 @@ export async function listAnnualInvoices(inputYear) {
           service_id as "serviceId",
           max_hours::float8 as "maxHours",
           used_hours::float8 as "usedHours",
-          for_year as "forYear"
+          for_year as "forYear",
+          coverage_start::text as "coverageStart",
+          coverage_end::text as "coverageEnd",
+          period_source as "periodSource"
         from annual_invoice_usage
-        where for_year = $1
-          and active = true
+        where active = true
+          and (
+            (coverage_start is null and coverage_end is null and for_year = $1)
+            or (
+              coverage_start is not null
+              and coverage_end is not null
+              and coverage_start <= make_date($1, 12, 31)
+              and coverage_end >= make_date($1, 1, 1)
+            )
+          )
       `,
       [selectedYear]
+    ),
+    pool.query(
+      `
+        select distinct
+          client.id as "billingClientId",
+          entry.task_name as "taskName"
+        from billing_clients client
+        join teamwork_time_entries entry on entry.project_id = client.teamwork_project_id
+        where client.status = 'active'
+          and lower(entry.task_name) like '%corporate records%'
+      `
     )
   ]);
 
@@ -119,10 +149,39 @@ export async function listAnnualInvoices(inputYear) {
     .filter(Boolean)
     .sort((a, b) => a - b);
 
+  const usage = usageResult.rows.map(mapUsage);
+  const corporateService = servicesResult.rows.find((service) => service.serviceKey === "maintain_corporate_records");
+  if (corporateService) {
+    const existingPeriods = new Set(usage
+      .filter((row) => row.coverageStart && row.coverageEnd)
+      .map((row) => `${row.billingClientId}:${row.serviceId}:${row.coverageStart}:${row.coverageEnd}`));
+
+    for (const task of corporateTasksResult.rows) {
+      const coverage = parseMaintainCorporateRecordsPeriod(task.taskName);
+      if (!coverage || coverage.startDate > `${selectedYear}-12-31` || coverage.endDate < `${selectedYear}-01-01`) continue;
+      const key = `${task.billingClientId}:${corporateService.id}:${coverage.startDate}:${coverage.endDate}`;
+      if (existingPeriods.has(key)) continue;
+      existingPeriods.add(key);
+      usage.push({
+        annualHours: Number(corporateService.defaultMaxHours || 12),
+        billingClientId: task.billingClientId,
+        clientName: "",
+        coverageEnd: coverage.endDate,
+        coverageStart: coverage.startDate,
+        periodSource: coverage.source,
+        serviceId: corporateService.id,
+        serviceName: corporateService.label,
+        usageId: `detected:${key}`,
+        usedHours: 0,
+        year: Number(coverage.endDate.slice(0, 4))
+      });
+    }
+  }
+
   return {
     clients: clientsResult.rows.map(mapClient),
     services: servicesResult.rows.map(mapService),
-    usage: usageResult.rows.map(mapUsage),
+    usage,
     year: selectedYear,
     years
   };
@@ -134,6 +193,16 @@ export async function updateAnnualInvoiceUsage(input = {}) {
   const year = toYear(input.year);
   const annualHours = toOptionalHours(input.annualHours, "Annual hours");
   const usedHours = toOptionalHours(input.usedHours, "Used hours") || 0;
+  const coverageStart = String(input.coverageStart || "").trim();
+  const coverageEnd = String(input.coverageEnd || "").trim();
+  const periodSource = String(input.periodSource || "").trim();
+  const hasCoveragePeriod = Boolean(coverageStart || coverageEnd);
+
+  if (hasCoveragePeriod && (!/^\d{4}-\d{2}-\d{2}$/.test(coverageStart) || !/^\d{4}-\d{2}-\d{2}$/.test(coverageEnd) || coverageStart > coverageEnd)) {
+    const error = new Error("Use a valid annual coverage period.");
+    error.statusCode = 400;
+    throw error;
+  }
 
   if (!billingClientId || !serviceId) {
     const error = new Error("Choose a client and annual invoice service.");
@@ -180,7 +249,20 @@ export async function updateAnnualInvoiceUsage(input = {}) {
     }
 
     const existingResult = await database.query(
+      hasCoveragePeriod
+        ? `
+        select id
+        from annual_invoice_usage
+        where billing_client_id = $1
+          and service_id = $2
+          and coverage_start = $3
+          and coverage_end = $4
+          and active = true
+        order by updated_at desc, created_at desc
+        limit 1
+        for update
       `
+        : `
         select id
         from annual_invoice_usage
         where billing_client_id = $1
@@ -191,12 +273,25 @@ export async function updateAnnualInvoiceUsage(input = {}) {
         limit 1
         for update
       `,
-      [billingClientId, serviceId, year]
+      hasCoveragePeriod
+        ? [billingClientId, serviceId, coverageStart, coverageEnd]
+        : [billingClientId, serviceId, year]
     );
 
     const client = clientResult.rows[0];
     const service = serviceResult.rows[0];
-    const params = [billingClientId, serviceId, client.display_name, service.label, annualHours, usedHours, year];
+    const params = [
+      billingClientId,
+      serviceId,
+      client.display_name,
+      service.label,
+      annualHours,
+      usedHours,
+      year,
+      hasCoveragePeriod ? coverageStart : null,
+      hasCoveragePeriod ? coverageEnd : null,
+      periodSource
+    ];
 
     const result = existingResult.rowCount
       ? await database.query(
@@ -208,8 +303,11 @@ export async function updateAnnualInvoiceUsage(input = {}) {
               max_hours = $3,
               used_hours = $4,
               for_year = $5,
+              coverage_start = $6,
+              coverage_end = $7,
+              period_source = $8,
               updated_at = now()
-            where id = $6
+            where id = $9
             returning
               id,
               billing_client_id as "billingClientId",
@@ -218,9 +316,22 @@ export async function updateAnnualInvoiceUsage(input = {}) {
               source_service_name as "sourceServiceName",
               max_hours::float8 as "maxHours",
               used_hours::float8 as "usedHours",
-              for_year as "forYear"
+              for_year as "forYear",
+              coverage_start::text as "coverageStart",
+              coverage_end::text as "coverageEnd",
+              period_source as "periodSource"
           `,
-          [client.display_name, service.label, annualHours, usedHours, year, existingResult.rows[0].id]
+          [
+            client.display_name,
+            service.label,
+            annualHours,
+            usedHours,
+            year,
+            hasCoveragePeriod ? coverageStart : null,
+            hasCoveragePeriod ? coverageEnd : null,
+            periodSource,
+            existingResult.rows[0].id
+          ]
         )
       : await database.query(
           `
@@ -231,9 +342,12 @@ export async function updateAnnualInvoiceUsage(input = {}) {
               source_service_name,
               max_hours,
               used_hours,
-              for_year
+              for_year,
+              coverage_start,
+              coverage_end,
+              period_source
             )
-            values ($1, $2, $3, $4, $5, $6, $7)
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             returning
               id,
               billing_client_id as "billingClientId",
@@ -242,7 +356,10 @@ export async function updateAnnualInvoiceUsage(input = {}) {
               source_service_name as "sourceServiceName",
               max_hours::float8 as "maxHours",
               used_hours::float8 as "usedHours",
-              for_year as "forYear"
+              for_year as "forYear",
+              coverage_start::text as "coverageStart",
+              coverage_end::text as "coverageEnd",
+              period_source as "periodSource"
           `,
           params
         );

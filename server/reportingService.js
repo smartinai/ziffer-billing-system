@@ -5,9 +5,9 @@ import {
   listMariaRolesByTeamworkProjectId,
   listTeamworkProjectDisplayNames
 } from "./billingClientRepository.js";
-import { normalizeProjects, normalizeTimeEntries, normalizeUsers } from "./normalizers.js";
+import { enrichTimeEntriesWithTasks, normalizeProjects, normalizeTimeEntries, normalizeUsers } from "./normalizers.js";
 import { listReportingDocumentAggregates } from "./reportingDocumentAggregateRepository.js";
-import { fetchProjects, fetchTimeEntries, fetchUsers, getTeamworkStatus } from "./teamworkClient.js";
+import { fetchProjects, fetchTasks, fetchTimeEntries, fetchUsers, getTeamworkStatus } from "./teamworkClient.js";
 import { hasStoredReportingData, readTeamworkStore, writeTeamworkStore } from "./teamworkStore.js";
 import {
   acquireTeamworkSyncLock,
@@ -101,10 +101,14 @@ async function fetchReconciliationData(startDate, endDate) {
     timeRows.push(...response.rows);
     timeRawRows.push(...response.rows);
   }
+  await pause();
+  const tasksResponse = await fetchTasks(timeRows.map((row) => row.taskId ?? row.task?.id ?? row.todoItemId ?? row.todoItem?.id));
+  responses.push(tasksResponse.metadata);
 
   return {
     api: mergeMetadata(responses),
     projectsResponse,
+    tasksResponse,
     timeResponse: { rows: timeRows, rawRows: timeRawRows },
     usersResponse
   };
@@ -328,10 +332,11 @@ export async function syncTeamworkStore(options = {}) {
 
     let usersResponse;
     let projectsResponse;
+    let tasksResponse;
     let timeResponse;
     let api;
     if (mode === "reconcile") {
-      ({ api, projectsResponse, timeResponse, usersResponse } = await fetchReconciliationData(range.fetchStart, range.fetchEnd));
+      ({ api, projectsResponse, tasksResponse, timeResponse, usersResponse } = await fetchReconciliationData(range.fetchStart, range.fetchEnd));
     } else {
       const responses = await Promise.allSettled([
         fetchUsers(),
@@ -341,7 +346,10 @@ export async function syncTeamworkStore(options = {}) {
       const failedResponse = responses.find((response) => response.status === "rejected");
       if (failedResponse) throw failedResponse.reason;
       [usersResponse, projectsResponse, timeResponse] = responses.map((response) => response.value);
-      api = mergeMetadata([usersResponse.metadata, projectsResponse.metadata, timeResponse.metadata]);
+      tasksResponse = await fetchTasks(
+        timeResponse.rows.map((row) => row.taskId ?? row.task?.id ?? row.todoItemId ?? row.todoItem?.id)
+      );
+      api = mergeMetadata([usersResponse.metadata, projectsResponse.metadata, tasksResponse.metadata, timeResponse.metadata]);
     }
     if (api.partial) {
       const error = new Error("Teamwork returned a partial response.");
@@ -357,7 +365,7 @@ export async function syncTeamworkStore(options = {}) {
       coverageStart: range.coverageStart,
       projects: normalizeProjects(projectsResponse.rows),
       syncedAt: new Date().toISOString(),
-      timeEntries: normalizeTimeEntries(timeResponse.rows),
+      timeEntries: normalizeTimeEntries(enrichTimeEntriesWithTasks(timeResponse.rows, tasksResponse.rows)),
       users: normalizeUsers(usersResponse.rows)
     };
 
@@ -365,6 +373,7 @@ export async function syncTeamworkStore(options = {}) {
       normalizedStore,
       {
         projects: projectsResponse.rows,
+        tasks: tasksResponse.rows,
         timeEntries: timeResponse.rows,
         users: usersResponse.rows
       },

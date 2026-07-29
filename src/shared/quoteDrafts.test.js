@@ -30,6 +30,14 @@ const services = [
     label: "VAT / Value added tax",
     serviceKey: "value_added_tax",
     sortOrder: 60
+  },
+  {
+    aliases: ["maintain corporate records", "maintaining corporate records", "maintaining corporate records and shareholders register"],
+    annualInvoiceEligible: true,
+    id: "service-corporate-records",
+    label: "Maintain corporate records",
+    serviceKey: "maintain_corporate_records",
+    sortOrder: 70
   }
 ];
 
@@ -49,6 +57,69 @@ test("matches standardized services from task names and aliases", () => {
   assert.equal(matchStandardService("Prepare annual accounts", services).serviceKey, "financial_statements");
   assert.equal(matchStandardService("Client correspondence", services).serviceKey, "filing_correspondence");
   assert.equal(matchStandardService("Custom advisory task", services), null);
+  assert.equal(
+    matchStandardService("Maintaining corporate records and shareholders register July 2026 - June 2027", services).serviceKey,
+    "maintain_corporate_records"
+  );
+});
+
+test("applies a shared 12h corporate-record allowance only inside the task period", () => {
+  const taskName = "Maintaining corporate records and shareholders register July 2026 - June 2027";
+  const preview = buildAggregatedQuotePreview({
+    annualUsage: [{
+      annualHours: 12,
+      coverageEnd: "2027-06-30",
+      coverageStart: "2026-07-01",
+      periodSource: "month_range",
+      serviceId: "service-corporate-records",
+      usageId: "usage-corporate-records",
+      usedHours: 0,
+      year: 2027
+    }],
+    billingClient,
+    entries: [
+      { date: "2026-06-30", hours: 3, id: "outside-before", isBillable: true, taskId: "records", taskName, userName: "Ada", userRate: 100 },
+      { date: "2026-07-01", hours: 8, id: "inside-one", isBillable: true, taskId: "records", taskName, userName: "Ada", userRate: 100 },
+      { date: "2027-06-30", hours: 6, id: "inside-two", isBillable: true, taskId: "records", taskName, userName: "Ada", userRate: 100 }
+    ],
+    periodEnd: "2027-06-30",
+    periodStart: "2026-06-01",
+    services
+  });
+
+  const covered = preview.lines.find((line) => line.annualCovered);
+  const invoiceable = preview.lines.find((line) => !line.annualCovered);
+  assert.equal(covered.quantityHours, 12);
+  assert.equal(covered.annualCoverage[0].coverageStart, "2026-07-01");
+  assert.equal(covered.annualCoverage[0].coverageEnd, "2027-06-30");
+  assert.equal(invoiceable.quantityHours, 5);
+  assert.equal(invoiceable.amount, 450);
+  assert.equal(preview.totals.annualCoveredHours, 12);
+  assert.equal(preview.totals.includedHours, 5);
+});
+
+test("keeps corporate-record time invoiceable when the title period cannot be parsed", () => {
+  const preview = buildAggregatedQuotePreview({
+    annualUsage: [],
+    billingClient,
+    entries: [{
+      date: "2026-07-15",
+      hours: 2,
+      id: "records-no-period",
+      isBillable: true,
+      taskId: "records-no-period",
+      taskName: "Maintain corporate records",
+      userName: "Ada",
+      userRate: 100
+    }],
+    periodEnd: "2026-07-31",
+    periodStart: "2026-07-01",
+    services
+  });
+
+  assert.equal(preview.lines[0].annualCovered, false);
+  assert.equal(preview.lines[0].amount, 180);
+  assert.equal(preview.warnings.some((warning) => warning.type === "missing_corporate_records_period"), true);
 });
 
 test("aggregates quote lines from Teamwork time and excludes already invoiced entries", () => {

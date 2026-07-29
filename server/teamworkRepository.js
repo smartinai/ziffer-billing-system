@@ -396,6 +396,7 @@ export async function persistTeamworkStoreToDatabase(store, raw = {}, options = 
     },
     rowCounts: {
       projects: projects.length,
+      tasks: raw.tasks?.length || 0,
       timeEntries: timeEntries.length,
       users: users.length
     },

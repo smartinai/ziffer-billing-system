@@ -1,4 +1,5 @@
 import { buildAggregatedQuotePreview, splitManualLineForAnnualCoverage } from "../src/shared/quoteDrafts.js";
+import { parseMaintainCorporateRecordsPeriod } from "../src/shared/annualServicePeriods.js";
 import { mariaRateForEntry } from "../src/shared/mariaRoleRates.js";
 import crypto from "node:crypto";
 import { config } from "./config.js";
@@ -642,7 +643,71 @@ async function loadAnnualUsage(database, billingClientId, startDate, endDate, en
     const number = Number(year);
     if (Number.isInteger(number) && !years.includes(number)) years.push(number);
   }
-  if (!billingClientId || !years.length) return [];
+  const corporatePeriods = new Map();
+  for (const entry of entries) {
+    const coverage = parseMaintainCorporateRecordsPeriod(entry.taskName);
+    if (coverage) corporatePeriods.set(coverage.key, coverage);
+  }
+  if (!billingClientId || (!years.length && !corporatePeriods.size)) return [];
+
+  if (corporatePeriods.size) {
+    const serviceResult = await database.query(
+      `
+        select service.id, service.label, annual.default_max_hours::float8 as "defaultMaxHours"
+        from standard_services service
+        join annual_invoice_services annual on annual.service_id = service.id
+        where service.service_key = 'maintain_corporate_records'
+          and service.active = true
+          and annual.active = true
+        limit 1
+      `
+    );
+    const service = serviceResult.rows[0];
+    if (service) {
+      for (const coverage of corporatePeriods.values()) {
+        await database.query(
+          `
+            insert into annual_invoice_usage (
+              billing_client_id,
+              service_id,
+              source_client_name,
+              source_service_name,
+              max_hours,
+              used_hours,
+              for_year,
+              coverage_start,
+              coverage_end,
+              period_source
+            )
+            select
+              client.id,
+              $2,
+              client.display_name,
+              $3,
+              $4,
+              0,
+              $5,
+              $6,
+              $7,
+              $8
+            from billing_clients client
+            where client.id = $1
+            on conflict do nothing
+          `,
+          [
+            billingClientId,
+            service.id,
+            service.label,
+            Number(service.defaultMaxHours || 12),
+            Number(coverage.endDate.slice(0, 4)),
+            coverage.startDate,
+            coverage.endDate,
+            coverage.source
+          ]
+        );
+      }
+    }
+  }
 
   const result = await database.query(
     `
@@ -652,11 +717,17 @@ async function loadAnnualUsage(database, billingClientId, startDate, endDate, en
         service_id as "serviceId",
         max_hours::float8 as "annualHours",
         used_hours::float8 as "usedHours",
-        for_year as year
+        for_year as year,
+        coverage_start::text as "coverageStart",
+        coverage_end::text as "coverageEnd",
+        period_source as "periodSource"
       from annual_invoice_usage
       where billing_client_id = $1
         and active = true
-        and for_year = any($2::int[])
+        and (
+          for_year = any($2::int[])
+          or (coverage_start is not null and coverage_end is not null)
+        )
     `,
     [billingClientId, years]
   );
@@ -664,6 +735,9 @@ async function loadAnnualUsage(database, billingClientId, startDate, endDate, en
   return result.rows.map((row) => ({
     annualHours: row.annualHours === null || row.annualHours === undefined ? null : Number(row.annualHours),
     billingClientId: row.billingClientId,
+    coverageEnd: row.coverageEnd || "",
+    coverageStart: row.coverageStart || "",
+    periodSource: row.periodSource || "",
     serviceId: row.serviceId,
     usageId: row.usageId,
     usedHours: Number(row.usedHours || 0),
@@ -682,7 +756,10 @@ async function loadAnnualUsageForService(database, billingClientId, serviceId) {
         service_id as "serviceId",
         max_hours::float8 as "annualHours",
         used_hours::float8 as "usedHours",
-        for_year as year
+        for_year as year,
+        coverage_start::text as "coverageStart",
+        coverage_end::text as "coverageEnd",
+        period_source as "periodSource"
       from annual_invoice_usage
       where billing_client_id = $1
         and service_id = $2
@@ -695,6 +772,9 @@ async function loadAnnualUsageForService(database, billingClientId, serviceId) {
   return result.rows.map((row) => ({
     annualHours: row.annualHours === null || row.annualHours === undefined ? null : Number(row.annualHours),
     billingClientId: row.billingClientId,
+    coverageEnd: row.coverageEnd || "",
+    coverageStart: row.coverageStart || "",
+    periodSource: row.periodSource || "",
     serviceId: row.serviceId,
     usageId: row.usageId,
     usedHours: Number(row.usedHours || 0),
@@ -1610,6 +1690,8 @@ async function annualUsageDeltasForPreview(database, previewId) {
             (regexp_match(line.task_name, '(^|[^0-9])(20[0-9]{2})([^0-9]|$)'))[2]::int,
             extract(year from min(entry.logged_on))::int
           ) as year,
+          nullif(line.source_snapshot->'annualCoverage'->0->>'coverageStart', '')::date as "coverageStart",
+          nullif(line.source_snapshot->'annualCoverage'->0->>'coverageEnd', '')::date as "coverageEnd",
           line.quantity_hours::float8 as hours,
           array_remove(array_agg(source.entry_id order by entry.logged_on, source.entry_id), null) as "sourceTimeEntryIds"
         from quote_lines line
@@ -1619,41 +1701,53 @@ async function annualUsageDeltasForPreview(database, previewId) {
           and line.annual_covered = true
           and line.is_billable = true
           and line.service_id is not null
-        group by line.id, line.service_id, line.annual_year, line.task_name, line.quantity_hours
+        group by line.id, line.service_id, line.annual_year, line.task_name, line.quantity_hours, line.source_snapshot
       ),
       annual_grouped as (
         select
           "serviceId",
           year,
+          "coverageStart",
+          "coverageEnd",
           coalesce(sum(hours), 0)::float8 as hours,
           array_agg("lineId" order by "lineId") as "lineIds"
         from annual_lines
-        group by "serviceId", year
+        group by "serviceId", year, "coverageStart", "coverageEnd"
       ),
       annual_sources as (
         select
           "serviceId",
           year,
+          "coverageStart",
+          "coverageEnd",
           array_agg(distinct source_time_entry_id) filter (where source_time_entry_id is not null) as "sourceTimeEntryIds"
         from annual_lines
         left join lateral unnest("sourceTimeEntryIds") as source(source_time_entry_id) on true
-        group by "serviceId", year
+        group by "serviceId", year, "coverageStart", "coverageEnd"
       )
       select
         grouped."serviceId",
         grouped.year,
+        grouped."coverageStart"::text as "coverageStart",
+        grouped."coverageEnd"::text as "coverageEnd",
         grouped.hours,
         grouped."lineIds",
         coalesce(sources."sourceTimeEntryIds", '{}') as "sourceTimeEntryIds"
       from annual_grouped grouped
-      left join annual_sources sources on sources."serviceId" = grouped."serviceId" and sources.year = grouped.year
-      order by grouped.year, grouped."serviceId"
+      left join annual_sources sources
+        on sources."serviceId" = grouped."serviceId"
+        and sources.year = grouped.year
+        and sources."coverageStart" is not distinct from grouped."coverageStart"
+        and sources."coverageEnd" is not distinct from grouped."coverageEnd"
+      order by grouped.year, grouped."coverageStart", grouped."serviceId"
     `,
     [previewId]
   );
 
   return result.rows.map((row) => ({
     hours: roundHours(row.hours),
+    coverageEnd: row.coverageEnd || "",
+    coverageStart: row.coverageStart || "",
     lineIds: row.lineIds || [],
     serviceId: row.serviceId,
     sourceTimeEntryIds: row.sourceTimeEntryIds || [],
@@ -1674,13 +1768,16 @@ async function applyAnnualUsageDeltas(database, { billingClientId, deltas, previ
         from annual_invoice_usage
         where billing_client_id = $1
           and service_id = $2
-          and for_year = $3
+          and (
+            ($4::date is not null and coverage_start = $4::date and coverage_end = $5::date)
+            or ($4::date is null and coverage_start is null and coverage_end is null and for_year = $3)
+          )
           and active = true
         order by updated_at desc, created_at desc
         limit 1
         for update
       `,
-      [billingClientId, delta.serviceId, delta.year]
+      [billingClientId, delta.serviceId, delta.year, delta.coverageStart || null, delta.coverageEnd || null]
     );
 
     if (!usageResult.rowCount) {
@@ -1726,6 +1823,8 @@ async function applyAnnualUsageDeltas(database, { billingClientId, deltas, previ
         nextUsedHours,
         JSON.stringify({
           hours: delta.hours,
+          coverageEnd: delta.coverageEnd || null,
+          coverageStart: delta.coverageStart || null,
           lineIds: delta.lineIds,
           quoteNumber,
           quotePreviewId: previewId,
@@ -1736,6 +1835,8 @@ async function applyAnnualUsageDeltas(database, { billingClientId, deltas, previ
 
     applied.push({
       annualUsageId: usage.id,
+      coverageEnd: delta.coverageEnd || "",
+      coverageStart: delta.coverageStart || "",
       hours: delta.hours,
       nextUsedHours,
       previousUsedHours,

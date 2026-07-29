@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { normalizeTimeEntries } from "./normalizers.js";
+import { enrichTimeEntriesWithTasks, normalizeTimeEntries } from "./normalizers.js";
 
 test("normalizes invoice-ready Teamwork time-entry fields", () => {
   const [entry] = normalizeTimeEntries([
@@ -38,4 +38,22 @@ test("treats Teamwork billable type strings as booleans", () => {
 
   assert.equal(entries[0].isBillable, true);
   assert.equal(entries[1].isBillable, false);
+});
+
+test("enriches time entries with bulk-fetched Teamwork task titles", () => {
+  const rows = enrichTimeEntriesWithTasks(
+    [
+      { id: 1, task: { id: 101, type: "tasks" } },
+      { id: 2, taskId: 102, taskName: "Already named" },
+      { id: 3, taskId: 999 }
+    ],
+    [
+      { id: 101, name: "Maintain corporate records July 2026 - June 2027" },
+      { id: 102, name: "Replacement title" }
+    ]
+  );
+
+  assert.equal(rows[0].taskName, "Maintain corporate records July 2026 - June 2027");
+  assert.equal(rows[1].taskName, "Already named");
+  assert.equal(rows[2].taskName, undefined);
 });

@@ -4603,12 +4603,76 @@ function annualDraftFromUsage(usage) {
   };
 }
 
+function groupPeriodUsage(usages = []) {
+  const groups = {};
+  for (const usage of usages) {
+    if (!usage.coverageStart || !usage.coverageEnd) continue;
+    const key = annualUsageKey(usage.billingClientId, usage.serviceId);
+    const current = groups[key] || [];
+    current.push(usage);
+    groups[key] = current;
+  }
+  for (const rows of Object.values(groups)) {
+    rows.sort((a, b) => String(b.coverageEnd).localeCompare(String(a.coverageEnd)));
+  }
+  return groups;
+}
+
+function AnnualPeriodRecord({ defaultMaxHours = 12, disabled = false, onBlur, onChange, usage = null }) {
+  if (!usage) return null;
+
+  const annualHours = usage?.annualHours ?? defaultMaxHours ?? 12;
+  const usedHours = usage?.usedHours ?? 0;
+
+  return (
+    <div className="annual-period-record">
+      <div className="annual-hours-cell">
+        <label>
+          <span>Pre-paid</span>
+          <input
+            aria-label={`${usage?.clientName || "Client"} Maintain corporate records pre-paid hours`}
+            disabled={disabled}
+            min="0"
+            step="0.25"
+            type="number"
+            value={annualHours}
+            onBlur={onBlur}
+            onChange={(event) => onChange?.("annualHours", event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") onBlur?.();
+            }}
+          />
+        </label>
+        <label>
+          <span>Used</span>
+          <input
+            aria-label={`${usage?.clientName || "Client"} Maintain corporate records used hours`}
+            disabled={disabled}
+            min="0"
+            step="0.25"
+            type="number"
+            value={usedHours}
+            onBlur={onBlur}
+            onChange={(event) => onChange?.("usedHours", event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") onBlur?.();
+            }}
+          />
+        </label>
+      </div>
+      <p>{formatPeriod(usage.coverageStart, usage.coverageEnd)}</p>
+    </div>
+  );
+}
+
 function AnnualInvoicesView() {
   const [year, setYear] = useState(2026);
   const [years, setYears] = useState([2025, 2026]);
   const [clients, setClients] = useState([]);
   const [services, setServices] = useState([]);
   const [usageByCell, setUsageByCell] = useState({});
+  const [periodUsageByCell, setPeriodUsageByCell] = useState({});
+  const [periodDrafts, setPeriodDrafts] = useState({});
   const [drafts, setDrafts] = useState({});
   const [loading, setLoading] = useState(true);
   const [autosaveStatus, setAutosaveStatus] = useState({ tone: "saved", text: "Saved" });
@@ -4635,7 +4699,9 @@ function AnnualInvoicesView() {
     try {
       const payload = await getAnnualInvoices(nextYear);
       const nextUsageByCell = Object.fromEntries(
-        (payload.usage || []).map((usage) => [annualUsageKey(usage.billingClientId, usage.serviceId), usage])
+        (payload.usage || [])
+          .filter((usage) => !usage.coverageStart || !usage.coverageEnd)
+          .map((usage) => [annualUsageKey(usage.billingClientId, usage.serviceId), usage])
       );
       const nextDrafts = {};
 
@@ -4648,6 +4714,12 @@ function AnnualInvoicesView() {
 
       setClients(payload.clients || []);
       setServices(payload.services || []);
+      setPeriodUsageByCell(groupPeriodUsage(payload.usage || []));
+      setPeriodDrafts(Object.fromEntries(
+        (payload.usage || [])
+          .filter((usage) => usage.coverageStart && usage.coverageEnd)
+          .map((usage) => [usage.usageId, { ...usage }])
+      ));
       setUsageByCellState(nextUsageByCell);
       setDraftsState(nextDrafts);
       setYears(payload.years || [2025, 2026]);
@@ -4733,6 +4805,51 @@ function AnnualInvoicesView() {
     scheduleAutosave(clientId, serviceId, nextDraft);
   }
 
+  async function savePeriodUsage(usage) {
+    setAutosaveStatus({ tone: "saving", text: "Saving..." });
+    setError("");
+    try {
+      const payload = await updateAnnualInvoiceUsage({
+        annualHours: usage.annualHours,
+        billingClientId: usage.billingClientId,
+        coverageEnd: usage.coverageEnd,
+        coverageStart: usage.coverageStart,
+        periodSource: usage.periodSource,
+        serviceId: usage.serviceId,
+        usedHours: usage.usedHours,
+        year
+      });
+      const saved = payload.usage;
+      setPeriodDrafts((current) => {
+        const next = { ...current };
+        delete next[usage.usageId];
+        next[saved.usageId] = saved;
+        return next;
+      });
+      setPeriodUsageByCell((current) => {
+        const key = annualUsageKey(saved.billingClientId, saved.serviceId);
+        return {
+          ...current,
+          [key]: (current[key] || []).map((row) =>
+            row.usageId === usage.usageId ? saved : row
+          )
+        };
+      });
+      setAutosaveStatus({ tone: "saved", text: "Saved" });
+    } catch (err) {
+      setError(err.message);
+      setAutosaveStatus({ tone: "error", text: "Not saved" });
+    }
+  }
+
+  function updatePeriodDraft(usage, field, value) {
+    setPeriodDrafts((current) => ({
+      ...current,
+      [usage.usageId]: { ...(current[usage.usageId] || usage), [field]: value }
+    }));
+    setAutosaveStatus({ tone: "saving", text: "Saving..." });
+  }
+
   useEffect(() => {
     yearRef.current = year;
     loadAnnualInvoices(year);
@@ -4747,7 +4864,7 @@ function AnnualInvoicesView() {
 
   const filledCells = Object.values(usageByCell).filter(
     (usage) => usage.annualHours !== "" || Number(usage.usedHours || 0) > 0
-  ).length;
+  ).length + Object.values(periodUsageByCell).filter((rows) => rows.length > 0).length;
 
   return (
     <Fragment>
@@ -4806,10 +4923,62 @@ function AnnualInvoicesView() {
                   {services.map((service) => {
                     const key = annualUsageKey(client.id, service.id);
                     const draft = annualDraftFromUsage(drafts[key]);
+                    const periodUsages = periodUsageByCell[key] || [];
 
                     return (
                       <td key={service.id}>
-                        <div className="annual-hours-cell">
+                        {service.periodBased ? (
+                          <div className="annual-period-cell">
+                            {periodUsages.length
+                              ? periodUsages.map((usage) => (
+                                <AnnualPeriodRecord
+                                  defaultMaxHours={service.defaultMaxHours}
+                                  disabled={loading}
+                                  key={usage.usageId}
+                                  usage={periodDrafts[usage.usageId] || usage}
+                                  onBlur={() => savePeriodUsage(periodDrafts[usage.usageId] || usage)}
+                                  onChange={(field, value) => updatePeriodDraft(usage, field, value)}
+                                />
+                              ))
+                              : (
+                                <div className="annual-hours-cell">
+                                  <label>
+                                    <span>Pre-paid</span>
+                                    <input
+                                      aria-label={`${client.displayName} ${service.label} pre-paid hours`}
+                                      disabled={loading}
+                                      min="0"
+                                      step="0.25"
+                                      type="number"
+                                      value={draft.annualHours === "" ? service.defaultMaxHours ?? 12 : draft.annualHours}
+                                      onChange={(event) => updateDraft(client.id, service.id, "annualHours", event.target.value)}
+                                      onBlur={() => flushAutosave(client.id, service.id)}
+                                      onKeyDown={(event) => {
+                                        if (event.key === "Enter") flushAutosave(client.id, service.id);
+                                      }}
+                                    />
+                                  </label>
+                                  <label>
+                                    <span>Used</span>
+                                    <input
+                                      aria-label={`${client.displayName} ${service.label} used hours`}
+                                      disabled={loading}
+                                      min="0"
+                                      step="0.25"
+                                      type="number"
+                                      value={draft.usedHours}
+                                      onChange={(event) => updateDraft(client.id, service.id, "usedHours", event.target.value)}
+                                      onBlur={() => flushAutosave(client.id, service.id)}
+                                      onKeyDown={(event) => {
+                                        if (event.key === "Enter") flushAutosave(client.id, service.id);
+                                      }}
+                                    />
+                                  </label>
+                                </div>
+                              )}
+                          </div>
+                        ) : (
+                          <div className="annual-hours-cell">
                           <label>
                             <span>Pre-paid</span>
                             <input
@@ -4842,7 +5011,8 @@ function AnnualInvoicesView() {
                               }}
                             />
                           </label>
-                        </div>
+                          </div>
+                        )}
                       </td>
                     );
                   })}
