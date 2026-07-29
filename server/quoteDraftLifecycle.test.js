@@ -94,6 +94,18 @@ test("source snapshots preserve the generated entry and annual breakdown", () =>
   assert.equal(saved.serviceLabel, source.serviceLabel);
 });
 
+test("draft-line removal cannot be combined with source-entry mutation", () => {
+  assert.doesNotThrow(() => quoteDraftTestHooks.assertEditableQuoteLinePatch({ id: "line-1", remove: true }));
+  assert.throws(
+    () => quoteDraftTestHooks.assertEditableQuoteLinePatch({
+      id: "line-1",
+      remove: true,
+      sourceTimeEntryIds: ["time-entry-1"]
+    }),
+    (error) => error.statusCode === 400 && error.code === "IMMUTABLE_SOURCE_ENTRIES"
+  );
+});
+
 test("task-level billable updates normalize and de-duplicate source entry IDs", () => {
   assert.deepEqual(
     quoteDraftTestHooks.requestedTimeEntryIds({ entryIds: [" entry-1 ", "entry-2", "entry-1", ""] }),

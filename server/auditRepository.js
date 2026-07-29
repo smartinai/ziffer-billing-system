@@ -18,10 +18,10 @@ export function sanitizeAuditMetadata(metadata = {}) {
   return safeValue(metadata) || {};
 }
 
-function actorName(actor) {
+export function auditActorName(actor) {
   if (!actor) return "system";
   if (typeof actor === "string") return actor || "system";
-  return actor.sub || actor.name || actor.username || "system";
+  return actor.displayName || actor.name || actor.username || actor.sub || actor.email || "system";
 }
 
 function compactText(value) {
@@ -36,6 +36,12 @@ export function auditSummary({ action, entityType, metadata = {} }) {
   if (label) return label;
 
   return compactText(`${action} ${entityType}`).trim();
+}
+
+export function normalizeAuditSummary(summary, resolvedActor, identities = []) {
+  return identities
+    .filter((identity) => identity && identity !== resolvedActor)
+    .reduce((normalized, identity) => normalized.replaceAll(identity, resolvedActor), summary);
 }
 
 export async function recordAuditEvent({
@@ -53,7 +59,7 @@ export async function recordAuditEvent({
 
     const safeMetadata = sanitizeAuditMetadata({
       ...metadata,
-      actor: actorName(actor),
+      actor: auditActorName(actor),
       summary: auditSummary({ action, entityType, metadata })
     });
 
@@ -95,36 +101,50 @@ export async function listAuditEvents(filters = {}) {
   const result = await pool.query(
     `
       select
-        id,
-        action,
-        entity_type as "entityType",
-        entity_id as "entityId",
-        metadata,
-        created_at as "createdAt"
-      from audit_events
-      where ($1::text is null or action = $1)
-        and ($2::text is null or entity_type = $2)
-        and ($3::text is null or metadata->>'actor' = $3)
-      order by created_at desc
+        event.id,
+        event.action,
+        event.entity_type as "entityType",
+        event.entity_id as "entityId",
+        event.metadata,
+        actor_user.email as "actorEmail",
+        coalesce(nullif(trim(actor_user.display_name), ''), event.metadata->>'actor', 'system') as "resolvedActor",
+        event.created_at as "createdAt"
+      from audit_events event
+      left join app_users actor_user
+        on lower(actor_user.email) = lower(event.metadata->>'actor')
+        or lower(actor_user.display_name) = lower(event.metadata->>'actor')
+      where ($1::text is null or event.action = $1)
+        and ($2::text is null or event.entity_type = $2)
+        and (
+          $3::text is null
+          or coalesce(nullif(trim(actor_user.display_name), ''), event.metadata->>'actor', 'system') = $3
+        )
+      order by event.created_at desc
       limit 300
     `,
     params
   );
 
-  const events = result.rows.map((row) => ({
-    action: row.action,
-    actor: row.metadata?.actor || "system",
-    createdAt: row.createdAt,
-    entityId: row.entityId || "",
-    entityType: row.entityType || "",
-    id: row.id,
-    metadata: row.metadata || {},
-    summary: row.metadata?.summary || auditSummary({
+  const events = result.rows.map((row) => {
+    const storedActor = row.metadata?.actor || "system";
+    const resolvedActor = row.resolvedActor || storedActor;
+    const storedSummary = row.metadata?.summary || auditSummary({
       action: row.action,
       entityType: row.entityType,
       metadata: row.metadata || {}
-    })
-  }));
+    });
+    const normalizedSummary = normalizeAuditSummary(storedSummary, resolvedActor, [storedActor, row.actorEmail]);
+    return {
+      action: row.action,
+      actor: resolvedActor,
+      createdAt: row.createdAt,
+      entityId: row.entityId || "",
+      entityType: row.entityType || "",
+      id: row.id,
+      metadata: row.metadata || {},
+      summary: normalizedSummary
+    };
+  });
 
   return {
     actions: [...new Set(events.map((event) => event.action).filter(Boolean))].sort(),

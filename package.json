@@ -1,6 +1,6 @@
 {
   "name": "ziffer-billing-system",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -21,6 +21,9 @@
     "db:seed-e2e": "node scripts/seed-e2e.mjs",
     "db:clean-e2e": "node scripts/clean-e2e.mjs",
     "lint": "eslint .",
+    "release:major": "node scripts/prepare-release.mjs major",
+    "release:minor": "node scripts/prepare-release.mjs minor",
+    "release:patch": "node scripts/prepare-release.mjs patch",
     "sync:teamwork:scheduled": "node scripts/sync-teamwork-scheduled.mjs",
     "start": "node server/index.js",
     "test": "node --test",

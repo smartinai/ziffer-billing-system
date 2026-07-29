@@ -185,13 +185,19 @@ export async function listReportingDocumentAggregates(startDate, endDate) {
         entry.hours::float8 as "entryHours",
         entry.project_id as "projectId",
         entry.user_id as "userId",
-        person.user_rate::float8 as "userRate",
+        coalesce(snapshot.user_rate, person.user_rate)::float8 as "userRate",
         source.source_order as "sourceOrder"
       from xero_quotes quote
       join quote_previews preview on preview.id = quote.quote_preview_id
       join quote_lines line on line.quote_preview_id = preview.id
       join lateral unnest(line.source_time_entry_ids) with ordinality as source(entry_id, source_order) on true
       join teamwork_time_entries entry on entry.id::text = source.entry_id::text
+      left join lateral (
+        select (snapshot_entry ->> 'userRate')::float8 as user_rate
+        from jsonb_array_elements(coalesce(line.source_snapshot -> 'entries', '[]'::jsonb)) snapshot_entry
+        where snapshot_entry ->> 'id' = entry.id::text
+        limit 1
+      ) snapshot on true
       left join teamwork_users person on person.id = entry.user_id
       left join billing_clients client on client.id = preview.billing_client_id
       where entry.logged_on between $1::date and $2::date

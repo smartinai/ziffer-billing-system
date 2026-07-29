@@ -1,5 +1,7 @@
 Ziffer Billing System - Changelog
 
+This is the legacy daily engineering log. Release notes and version history now live in CHANGELOG.md.
+
 Use this file to track daily implementation progress for Teamwork.
 Add a new dated section whenever work continues on a new day.
 

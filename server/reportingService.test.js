@@ -27,6 +27,25 @@ test("incremental sync falls back to the configured start date without a checkpo
   });
 });
 
+test("scheduled reconciliation covers the full current year", () => {
+  assert.deepEqual(reportingServiceTestHooks.syncRange({
+    endDate: "2026-07-22",
+    mode: "reconcile"
+  }), {
+    coverageStart: "2026-01-01",
+    fetchEnd: "2026-07-22",
+    fetchStart: "2026-01-01"
+  });
+});
+
+test("year-to-date reconciliation is split into non-overlapping monthly windows", () => {
+  assert.deepEqual(reportingServiceTestHooks.monthWindows("2026-01-01", "2026-03-15"), [
+    { startDate: "2026-01-01", endDate: "2026-01-31" },
+    { startDate: "2026-02-01", endDate: "2026-02-28" },
+    { startDate: "2026-03-01", endDate: "2026-03-15" }
+  ]);
+});
+
 test("incremental cache merging preserves historical rows and replaces matching IDs", () => {
   const merged = reportingServiceTestHooks.mergeIncrementalStore({
     projects: [{ id: "p1", name: "Old" }],
@@ -53,4 +72,22 @@ test("scheduled dates use Europe Amsterdam across a UTC date boundary", () => {
     reportingServiceTestHooks.dateInTimezone(new Date("2026-07-15T22:30:00Z"), "Europe/Amsterdam"),
     "2026-07-16"
   );
+});
+
+test("billing display names override reporting labels without changing Teamwork identities", () => {
+  const projects = [
+    { id: "p1", name: "2BE Investments SCS - B305040 - 20.02.2026", companyName: "2BE" },
+    { id: "p2", name: "Unchanged client", companyName: "Other" }
+  ];
+
+  const renamed = reportingServiceTestHooks.applyProjectDisplayNames(
+    projects,
+    new Map([["p1", "2BE Investments SCS"]])
+  );
+
+  assert.deepEqual(renamed, [
+    { id: "p1", name: "2BE Investments SCS", companyName: "2BE" },
+    projects[1]
+  ]);
+  assert.equal(projects[0].name, "2BE Investments SCS - B305040 - 20.02.2026");
 });

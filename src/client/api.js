@@ -184,7 +184,7 @@ export function syncBillingQuotesXeroStatus() {
 
 export function getXeroReference({ force = false } = {}) {
   if (demoMode) {
-    return Promise.resolve({ accounts: [], contacts: [], taxRates: [] });
+    return Promise.resolve({ accounts: [], contacts: [], items: [], taxRates: [] });
   }
   const params = new URLSearchParams();
   if (force) params.set("force", "true");
@@ -342,6 +342,14 @@ export function sendQuoteToXero(previewId, input = {}) {
     });
   }
   return request(`/api/billing/quote-previews/${previewId}/send-to-xero`, {
+    body: JSON.stringify(input),
+    method: "POST"
+  });
+}
+
+export function previewQuoteInXero(previewId, input = {}) {
+  if (demoMode) return Promise.resolve({ document: null, validationWarnings: [], version: input.version || 1 });
+  return request(`/api/billing/quote-previews/${previewId}/xero-preview`, {
     body: JSON.stringify(input),
     method: "POST"
   });

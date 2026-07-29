@@ -15,6 +15,7 @@ import {
   createQuotePreview,
   getArchivedQuoteDraft,
   listQuoteDrafts,
+  previewQuoteForXero,
   releaseQuoteDraftLocksForSession,
   reconcileQuotePreviewXeroSend,
   renewQuoteDraftLock,
@@ -26,6 +27,8 @@ import {
 import { getReportingSummary, getSourceStatus, refreshStoredReportingSummary } from "./reportingService.js";
 import { operationsRouter } from "./routes/operationsRoutes.js";
 import { securityHeaders } from "./securityHeaders.js";
+import { syncBillableStateToTeamwork } from "./teamworkBillableSync.js";
+import { appVersion } from "./version.js";
 import {
   buildXeroAuthorizationUrl,
   createXeroOAuthState,
@@ -47,7 +50,7 @@ app.use(express.json({ limit: "2mb" }));
 app.use(cookieParser());
 
 function liveHealth(_req, res) {
-  res.json({ ok: true, service: "ziffer-reporting" });
+  res.json({ ok: true, service: "ziffer-reporting", version: appVersion.version });
 }
 
 async function readyHealth(_req, res) {
@@ -59,6 +62,7 @@ app.get("/api/health", liveHealth);
 app.get("/api/health/live", liveHealth);
 app.get("/api/health/db", readyHealth);
 app.get("/api/health/ready", readyHealth);
+app.get("/api/version", (_req, res) => res.json(appVersion));
 
 app.get("/api/auth/session", sessionHandler);
 app.get("/api/auth/csrf", requireAuth, csrfTokenHandler);
@@ -74,6 +78,26 @@ app.post("/api/auth/logout", requireAuth, requireCsrf, async (req, res, next) =>
 app.patch("/api/auth/account", requireAuth, requireCsrf, updateAccountHandler);
 
 app.use("/api/admin/operations", operationsRouter);
+
+function queueBillableStateSyncToTeamwork(input) {
+  void syncBillableStateToTeamwork(input).catch(async (error) => {
+    const message = String(error?.message || "Unexpected Teamwork billable synchronization failure.").slice(0, 500);
+    console.error(`Teamwork billable synchronization could not run for draft ${input.quotePreviewId}: ${message}`);
+    await recordAuditEvent({
+      action: "teamwork_billable_sync_error",
+      actor: input.actor,
+      entityId: input.quotePreviewId,
+      entityType: "quote_preview",
+      metadata: {
+        failedEntryIds: input.entryIds,
+        isBillable: Boolean(input.isBillable),
+        message,
+        summary: `Teamwork billable synchronization could not run for ${input.entryIds.length} time ${input.entryIds.length === 1 ? "entry" : "entries"}`
+      }
+    });
+  });
+  return { status: "queued" };
+}
 
 function parseDateRange(req, res) {
   const startDate = String(req.query.startDate || config.defaultStartDate);
@@ -143,6 +167,7 @@ app.patch("/api/billing/clients/:id", requireAuth, requireCsrf, async (req, res,
       entityType: "billing_client",
       metadata: {
         clientName: client.displayName,
+        mariaRole: client.mariaRole,
         status: client.status,
         summary: `Updated billing client ${client.displayName}`
       }
@@ -315,6 +340,8 @@ app.patch("/api/billing/quote-previews/:id", requireAuth, requireCsrf, async (re
   try {
     const payload = await updateQuotePreviewMetadata(req.params.id, req.body, req.user);
     const lineUpdates = Array.isArray(req.body?.lines) ? req.body.lines : [];
+    const removedRows = lineUpdates.filter((line) => line?.id && line.remove === true).length;
+    const manualRowsAdded = lineUpdates.filter((line) => line && !line.id).length;
     await recordAuditEvent({
       action: lineUpdates.length ? "document_rows_update" : "document_metadata_update",
       actor: req.user,
@@ -323,9 +350,10 @@ app.patch("/api/billing/quote-previews/:id", requireAuth, requireCsrf, async (re
       metadata: {
         documentNumber: payload.preview?.quoteNumber,
         lineUpdateCount: lineUpdates.length,
-        manualRowsAdded: lineUpdates.filter((line) => line && !line.id).length,
+        manualRowsAdded,
+        removedRows,
         summary: lineUpdates.length
-          ? `${lineUpdates.filter((line) => line && !line.id).length ? `Added ${lineUpdates.filter((line) => line && !line.id).length} manual row${lineUpdates.filter((line) => line && !line.id).length === 1 ? "" : "s"} to ` : `Updated ${lineUpdates.length} document row${lineUpdates.length === 1 ? "" : "s"} on `}${payload.preview?.quoteNumber || "document"}`
+          ? `${removedRows ? `Removed ${removedRows} document row${removedRows === 1 ? "" : "s"} from ` : manualRowsAdded ? `Added ${manualRowsAdded} manual row${manualRowsAdded === 1 ? "" : "s"} to ` : `Updated ${lineUpdates.length} document row${lineUpdates.length === 1 ? "" : "s"} on `}${payload.preview?.quoteNumber || "document"}`
           : `Updated document metadata ${payload.preview?.quoteNumber || ""}`.trim()
       }
     });
@@ -335,14 +363,29 @@ app.patch("/api/billing/quote-previews/:id", requireAuth, requireCsrf, async (re
   }
 });
 
+app.post("/api/billing/quote-previews/:id/xero-preview", requireAuth, requireCsrf, async (req, res, next) => {
+  try {
+    res.json(await previewQuoteForXero(req.params.id, req.body || {}, req.user));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.patch("/api/billing/quote-previews/:id/time-entries/:entryId", requireAuth, requireCsrf, async (req, res, next) => {
   try {
+    const entryIds = [req.params.entryId];
     const payload = await updateQuotePreviewTimeEntryBillable(req.params.id, {
       editorSessionId: req.body?.editorSessionId,
       entryId: req.params.entryId,
       isBillable: req.body?.isBillable,
       version: req.body?.version
     }, req.user);
+    const teamworkSync = queueBillableStateSyncToTeamwork({
+      actor: req.user,
+      entryIds,
+      isBillable: req.body?.isBillable,
+      quotePreviewId: req.params.id
+    });
     await recordAuditEvent({
       action: "time_entry_billable_update",
       actor: req.user,
@@ -351,10 +394,11 @@ app.patch("/api/billing/quote-previews/:id/time-entries/:entryId", requireAuth, 
       metadata: {
         isBillable: req.body?.isBillable,
         quotePreviewId: req.params.id,
-        summary: `Marked time entry ${req.params.entryId} ${req.body?.isBillable ? "billable" : "unbillable"}`
+        summary: `Marked time entry ${req.params.entryId} ${req.body?.isBillable ? "billable" : "unbillable"}`,
+        teamworkSync
       }
     });
-    res.json(payload);
+    res.json({ ...payload, teamworkSync });
   } catch (error) {
     next(error);
   }
@@ -413,6 +457,12 @@ app.patch("/api/billing/quote-previews/:id/time-entries", requireAuth, requireCs
       isBillable: req.body?.isBillable,
       version: req.body?.version
     }, req.user);
+    const teamworkSync = queueBillableStateSyncToTeamwork({
+      actor: req.user,
+      entryIds,
+      isBillable: req.body?.isBillable,
+      quotePreviewId: req.params.id
+    });
     await recordAuditEvent({
       action: "time_entry_billable_update",
       actor: req.user,
@@ -422,10 +472,11 @@ app.patch("/api/billing/quote-previews/:id/time-entries", requireAuth, requireCs
         entryCount: entryIds.length,
         isBillable: req.body?.isBillable,
         quotePreviewId: req.params.id,
-        summary: `Marked ${entryIds.length} task time ${entryIds.length === 1 ? "entry" : "entries"} ${req.body?.isBillable ? "billable" : "unbillable"}`
+        summary: `Marked ${entryIds.length} task time ${entryIds.length === 1 ? "entry" : "entries"} ${req.body?.isBillable ? "billable" : "unbillable"}`,
+        teamworkSync
       }
     });
-    res.json(payload);
+    res.json({ ...payload, teamworkSync });
   } catch (error) {
     next(error);
   }

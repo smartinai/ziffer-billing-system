@@ -40,6 +40,18 @@ function accountRow(row) {
   };
 }
 
+function itemRow(row) {
+  return {
+    code: row.code || "",
+    description: row.description || "",
+    id: row.id || "",
+    name: row.name || "",
+    salesAccountCode: row.sales_account_code || "",
+    salesUnitPrice: row.sales_unit_price === null ? null : toNumber(row.sales_unit_price),
+    taxType: row.tax_type || ""
+  };
+}
+
 function firstText(...values) {
   for (const value of values) {
     const text = String(value || "").trim();
@@ -99,21 +111,45 @@ function toLiveAccount(account) {
   };
 }
 
+function toLiveItem(item) {
+  const code = firstText(item.Code, item.code);
+  if (!code) return null;
+  const salesDetails = item.SalesDetails || item.salesDetails || {};
+  return {
+    code,
+    description: firstText(item.Description, item.description, salesDetails.Description, salesDetails.description),
+    id: firstText(item.ItemID, item.itemID, item.id),
+    isSold: item.IsSold !== false,
+    name: firstText(item.Name, item.name),
+    raw: item || {},
+    salesAccountCode: firstText(salesDetails.AccountCode, salesDetails.accountCode),
+    salesUnitPrice: salesDetails.UnitPrice === null || salesDetails.UnitPrice === undefined
+      ? null
+      : toNumber(salesDetails.UnitPrice),
+    taxType: firstText(salesDetails.TaxType, salesDetails.taxType)
+  };
+}
+
 async function xeroReferenceCacheState(database) {
   const result = await database.query(`
     select
       (select count(*)::int from xero_contacts where id not like 'sheet:%') as contacts,
       (select count(*)::int from xero_tax_rates) as tax_rates,
       (select count(*)::int from xero_accounts) as accounts,
+      (select count(*)::int from xero_items where code ~ '^[0-9]-[0-9]{3}$') as items,
       least(
         coalesce((select max(synced_at) from xero_contacts where id not like 'sheet:%'), 'epoch'::timestamptz),
         coalesce((select max(synced_at) from xero_tax_rates), 'epoch'::timestamptz),
-        coalesce((select max(synced_at) from xero_accounts), 'epoch'::timestamptz)
+        coalesce((select max(synced_at) from xero_accounts), 'epoch'::timestamptz),
+        coalesce((select max(synced_at) from xero_items), 'epoch'::timestamptz)
       ) as oldest_synced_at
   `);
   const row = result.rows[0] || {};
   const oldestSyncedAt = row.oldest_synced_at ? new Date(row.oldest_synced_at).getTime() : 0;
-  const hasReferenceData = Number(row.contacts || 0) > 0 && Number(row.tax_rates || 0) > 0 && Number(row.accounts || 0) > 0;
+  const hasReferenceData = Number(row.contacts || 0) > 0 &&
+    Number(row.tax_rates || 0) > 0 &&
+    Number(row.accounts || 0) > 0 &&
+    Number(row.items || 0) > 0;
   return {
     hasReferenceData,
     oldestSyncedAt,
@@ -156,6 +192,7 @@ export async function syncXeroReferenceData({ force = false } = {}) {
   const contacts = (liveReference.contacts || []).map(toLiveContact).filter(Boolean);
   const taxRates = (liveReference.taxRates || []).map(toLiveTaxRate).filter(Boolean);
   const accounts = (liveReference.accounts || []).map(toLiveAccount).filter(Boolean);
+  const items = (liveReference.items || []).map(toLiveItem).filter(Boolean);
   const database = await pool.connect();
 
   try {
@@ -233,6 +270,39 @@ export async function syncXeroReferenceData({ force = false } = {}) {
       );
     }
 
+    for (const item of items) {
+      await database.query(
+        `
+          insert into xero_items (
+            code, id, name, description, sales_unit_price, sales_account_code,
+            tax_type, is_sold, raw, synced_at
+          )
+          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+          on conflict (code) do update
+          set id = excluded.id,
+              name = excluded.name,
+              description = excluded.description,
+              sales_unit_price = excluded.sales_unit_price,
+              sales_account_code = excluded.sales_account_code,
+              tax_type = excluded.tax_type,
+              is_sold = excluded.is_sold,
+              raw = excluded.raw,
+              synced_at = now()
+        `,
+        [
+          item.code,
+          item.id,
+          item.name,
+          item.description,
+          item.salesUnitPrice,
+          item.salesAccountCode,
+          item.taxType,
+          item.isSold,
+          JSON.stringify(item.raw)
+        ]
+      );
+    }
+
     if (contacts.length) {
       await database.query("delete from xero_contacts where id like 'sheet:%'");
     }
@@ -242,6 +312,7 @@ export async function syncXeroReferenceData({ force = false } = {}) {
     return {
       connected: true,
       contacts: contacts.length,
+      items: items.length,
       taxRates: taxRates.length,
       accounts: accounts.length,
       synced: true,
@@ -296,6 +367,21 @@ export async function listXeroAccounts() {
   return result.rows.map(accountRow);
 }
 
+export async function listXeroItems() {
+  const pool = getDatabasePool();
+  if (!pool) return [];
+
+  const result = await query(`
+    select code, id, name, description, sales_unit_price, sales_account_code, tax_type
+    from xero_items
+    where is_sold = true
+      and code ~ '^[0-9]-[0-9]{3}$'
+    order by code
+  `);
+
+  return result.rows.map(itemRow);
+}
+
 export async function getXeroReference({ force = false, sync = false } = {}) {
   let syncResult = null;
   if (sync) {
@@ -309,15 +395,17 @@ export async function getXeroReference({ force = false, sync = false } = {}) {
     }
   }
 
-  const [contacts, taxRates, accounts] = await Promise.all([
+  const [contacts, taxRates, accounts, items] = await Promise.all([
     listXeroContacts(),
     listXeroTaxRates(),
-    listXeroAccounts()
+    listXeroAccounts(),
+    listXeroItems()
   ]);
 
   return {
     accounts,
     contacts,
+    items,
     sync: syncResult,
     taxRates
   };

@@ -58,6 +58,52 @@ function mapIncident(row) {
   };
 }
 
+function buildOperationComponents({ database, failureByType, latestRows, successByType, teamwork, xero }) {
+  const hiddenDerivedTypes = new Set(["database_health", "teamwork_sync", "xero_status"]);
+  const components = latestRows
+    .filter((row) => !hiddenDerivedTypes.has(row.operation_type))
+    .map((row) => ({
+      component: row.operation_type,
+      status: row.status,
+      checkedAt: row.finished_at || row.started_at,
+      latestSuccessAt: successByType.get(row.operation_type) || null,
+      latestFailureAt: failureByType.get(row.operation_type)?.finished_at || null,
+      latestFailureMessage: failureByType.get(row.operation_type)?.error_message || "",
+      message: row.error_message || "",
+      metadata: row.metadata || {}
+    }));
+
+  components.push({
+    component: "database",
+    status: database.ok ? "complete" : "failed",
+    checkedAt: database.checkedAt || new Date().toISOString(),
+    latestSuccessAt: successByType.get("database_health") || null,
+    latestFailureAt: failureByType.get("database_health")?.finished_at || null,
+    message: database.message || "",
+    metadata: { database: database.database || "" }
+  });
+  components.push({
+    component: "teamwork",
+    status: teamwork?.status || "unknown",
+    checkedAt: teamwork?.finished_at || null,
+    latestSuccessAt: successByType.get("teamwork_sync") || (teamwork?.status === "complete" ? teamwork?.finished_at : null),
+    latestFailureAt: failureByType.get("teamwork_sync")?.finished_at || null,
+    message: teamwork?.error_message || "",
+    metadata: { coverageEnd: teamwork?.coverage_end || null, partial: teamwork?.partial ?? null }
+  });
+  components.push({
+    component: "xero",
+    status: Number(xero?.failures || 0) > 0 ? "warning" : "complete",
+    checkedAt: xero?.last_sync || null,
+    latestSuccessAt: successByType.get("xero_status") || xero?.last_sync || null,
+    latestFailureAt: failureByType.get("xero_status")?.finished_at || null,
+    message: "",
+    metadata: { failedDocuments: Number(xero?.failures || 0) }
+  });
+
+  return components;
+}
+
 export async function recordOperationRun(input = {}) {
   const pool = getDatabasePool();
   if (!pool) throw new Error("DATABASE_URL is not configured.");
@@ -194,19 +240,14 @@ export async function getOperationsOverview({ limit = 50 } = {}) {
 
   const successByType = new Map(successes.rows.map((row) => [row.operation_type, row.finished_at]));
   const failureByType = new Map(failures.rows.map((row) => [row.operation_type, row]));
-  const components = latest.rows.map((row) => ({
-    component: row.operation_type,
-    status: row.status,
-    checkedAt: row.finished_at || row.started_at,
-    latestSuccessAt: successByType.get(row.operation_type) || null,
-    latestFailureAt: failureByType.get(row.operation_type)?.finished_at || null,
-    latestFailureMessage: failureByType.get(row.operation_type)?.error_message || "",
-    message: row.error_message || "",
-    metadata: row.metadata || {}
-  }));
-  components.push({ component: "database", status: database.ok ? "complete" : "failed", checkedAt: database.checkedAt || new Date().toISOString(), message: database.message || "", metadata: { database: database.database || "" } });
-  components.push({ component: "teamwork", status: teamwork.rows[0]?.status || "unknown", checkedAt: teamwork.rows[0]?.finished_at || null, message: teamwork.rows[0]?.error_message || "", metadata: { coverageEnd: teamwork.rows[0]?.coverage_end || null, partial: teamwork.rows[0]?.partial ?? null } });
-  components.push({ component: "xero", status: Number(xero.rows[0]?.failures || 0) > 0 ? "warning" : "complete", checkedAt: xero.rows[0]?.last_sync || null, message: "", metadata: { failedDocuments: Number(xero.rows[0]?.failures || 0) } });
+  const components = buildOperationComponents({
+    database,
+    failureByType,
+    latestRows: latest.rows,
+    successByType,
+    teamwork: teamwork.rows[0],
+    xero: xero.rows[0]
+  });
 
   return {
     checkedAt: new Date().toISOString(),
@@ -217,4 +258,4 @@ export async function getOperationsOverview({ limit = 50 } = {}) {
   };
 }
 
-export const operationsTestHooks = { safeMetadata, sanitizeText };
+export const operationsTestHooks = { buildOperationComponents, safeMetadata, sanitizeText };

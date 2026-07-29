@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { auditSummary, sanitizeAuditMetadata } from "./auditRepository.js";
+import { auditActorName, auditSummary, normalizeAuditSummary, sanitizeAuditMetadata } from "./auditRepository.js";
 
 test("redacts secret-looking audit metadata fields", () => {
   const metadata = sanitizeAuditMetadata({
@@ -43,5 +43,34 @@ test("builds readable audit summaries from metadata", () => {
       metadata: { summary: "Updated billing client KPS" }
     }),
     "Updated billing client KPS"
+  );
+});
+
+test("prefers a user's display name over their login email", () => {
+  assert.equal(
+    auditActorName({
+      displayName: "Smartin Studios",
+      email: "smartinstudios@protonmail.com",
+      sub: "smartinstudios@protonmail.com"
+    }),
+    "Smartin Studios"
+  );
+  assert.equal(
+    auditActorName({
+      name: "Smartin Studios",
+      sub: "smartinstudios@protonmail.com"
+    }),
+    "Smartin Studios"
+  );
+});
+
+test("replaces historical login emails in audit summaries", () => {
+  assert.equal(
+    normalizeAuditSummary(
+      "smartinstudios@protonmail.com logged in",
+      "Smartin Studios",
+      ["Smartin Studios", "smartinstudios@protonmail.com"]
+    ),
+    "Smartin Studios logged in"
   );
 });

@@ -1,6 +1,6 @@
 import { recordAuditEvent } from "./auditRepository.js";
 import { config } from "./config.js";
-import { runIncrementalTeamworkSync } from "./reportingService.js";
+import { runYearToDateTeamworkReconciliation } from "./reportingService.js";
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -14,7 +14,7 @@ export async function runScheduledTeamworkSync({
   attempts = config.teamworkScheduledSyncAttempts,
   delay = wait,
   retryDelayMs = config.teamworkScheduledSyncRetryMs,
-  sync = runIncrementalTeamworkSync,
+  sync = runYearToDateTeamworkReconciliation,
   record = recordAuditEvent
 } = {}) {
   const totalAttempts = Math.max(1, Number(attempts || 1));
