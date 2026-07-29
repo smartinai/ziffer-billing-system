@@ -2738,6 +2738,7 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
   const lastLockRenewalRef = useRef(0);
   const lockReacquisitionRef = useRef(null);
   const pendingInlineCellRef = useRef(null);
+  const inlineEditGenerationRef = useRef(0);
   const quoteIsLocked = quoteStatus !== "preview" || ["sending", "unknown"].includes(xeroSendState);
   const selectedXeroDocumentLabel = xeroDocumentTypeLabel(xeroDocumentType);
   const isDraftQuote = xeroDocumentType === "draft_quote";
@@ -3030,6 +3031,7 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
 
   function activateInlineCell(line, field) {
     pendingInlineCellRef.current = null;
+    inlineEditGenerationRef.current += 1;
     setInlineEdit({ field, lineId: line.id, value: inlineQuoteLineDraftValue(line, field) });
     setLineError("");
   }
@@ -3037,13 +3039,19 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
   function beginInlineEdit(line, field) {
     if (quoteIsLocked || savingLineIds.has(line.id)) return;
     if (inlineEdit && (inlineEdit.lineId !== line.id || inlineEdit.field !== field)) {
-      pendingInlineCellRef.current = { field, line };
-      return;
+      const activeEditor = document.querySelector(
+        `[data-inline-editor="${inlineEdit.lineId}:${inlineEdit.field}"]`
+      );
+      if (activeEditor) {
+        pendingInlineCellRef.current = { field, line };
+        return;
+      }
     }
     activateInlineCell(line, field);
   }
 
   function cancelInlineEdit() {
+    inlineEditGenerationRef.current += 1;
     setInlineEdit(null);
     pendingInlineCellRef.current = null;
     setLineError("");
@@ -3058,6 +3066,7 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
   async function saveInlineEdit() {
     if (!inlineEdit || !preview.id || quoteIsLocked) return;
     const current = inlineEdit;
+    const editGeneration = inlineEditGenerationRef.current;
     const line = quoteLines.find((candidate) => candidate.id === current.lineId);
     if (!line) return cancelInlineEdit();
 
@@ -3089,7 +3098,7 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
       mergeLinePreviewUpdate(payload.preview || {});
       const nextCell = pendingInlineCellRef.current;
       if (nextCell) activateInlineCell(nextCell.line, nextCell.field);
-      else setInlineEdit((active) => active?.lineId === current.lineId && active?.field === current.field ? null : active);
+      else if (inlineEditGenerationRef.current === editGeneration) setInlineEdit(null);
       return true;
     } catch (error) {
       setLineError(error.message);

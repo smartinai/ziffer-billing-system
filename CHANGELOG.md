@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-29
+
+### Added
+
+- New invoice drafts now suggest the next client-specific Xero invoice number using the `[abbreviation]-[year]-[sequence]` format, starting at `01`.
+
+### Changed
+
+- Xero invoice-number suggestions recognize both compact (`STS-202605`) and separated (`TDI-2026-05`) client formats, normalize legacy spacing and one-digit sequences, and ignore unrelated clients, years, annual-fee numbers, quotes and non-sequence suffixes.
+- When Xero cannot be checked, draft creation continues with the existing fallback number and shows a review warning.
+
 ## [0.5.0] - 2026-07-29
 
 ### Added

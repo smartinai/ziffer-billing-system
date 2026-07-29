@@ -6,7 +6,7 @@ import { config } from "./config.js";
 import { getDatabasePool } from "./db.js";
 import { openAlertIncident, resolveAlertIncident } from "./operationsRepository.js";
 import { fetchTask } from "./teamworkClient.js";
-import { findXeroDocumentByNumber, sendQuoteRequestToXero } from "./xeroClient.js";
+import { findXeroDocumentByNumber, sendQuoteRequestToXero, suggestNextXeroInvoiceNumber } from "./xeroClient.js";
 import { buildXeroDocumentPreview } from "./xeroDocumentPreview.js";
 
 const validDate = /^\d{4}-\d{2}-\d{2}$/;
@@ -1867,6 +1867,33 @@ export async function createQuotePreview({ billingClientId, documentType, editor
     throw error;
   }
 
+  let xeroInvoiceNumber = "";
+  let xeroInvoiceNumberUnavailable = nextDocumentType === "draft_invoice";
+  if (nextDocumentType === "draft_invoice") {
+    const clientLookup = await pool.query(
+      `
+        select abbreviation, xero_contact_id as "xeroContactId"
+        from billing_clients
+        where id = $1
+      `,
+      [billingClientId]
+    );
+    const client = clientLookup.rows[0];
+    if (client?.abbreviation && client?.xeroContactId) {
+      try {
+        const suggestion = await suggestNextXeroInvoiceNumber({
+          abbreviation: client.abbreviation,
+          contactId: client.xeroContactId,
+          year: today().slice(0, 4)
+        });
+        xeroInvoiceNumber = suggestion.invoiceNumber || "";
+        xeroInvoiceNumberUnavailable = suggestion.mode !== "live" || !xeroInvoiceNumber;
+      } catch {
+        xeroInvoiceNumberUnavailable = true;
+      }
+    }
+  }
+
   const database = await pool.connect();
 
   try {
@@ -1982,7 +2009,23 @@ export async function createQuotePreview({ billingClientId, documentType, editor
     const quoteDate = today();
     const expiryDate = addDays(quoteDate, 14);
     const reference = previousMonthReference(quoteDate);
-    const quoteNumber = `DRAFT-${startDate.slice(0, 7).replace("-", "")}-${slug(billingClient.abbreviation || billingClient.displayName)}-${String(Number(clientPreviewCountResult.rows[0]?.count || 0) + 1).padStart(3, "0")}`;
+    const fallbackQuoteNumber = `DRAFT-${startDate.slice(0, 7).replace("-", "")}-${slug(billingClient.abbreviation || billingClient.displayName)}-${String(Number(clientPreviewCountResult.rows[0]?.count || 0) + 1).padStart(3, "0")}`;
+    const quoteNumber = nextDocumentType === "draft_invoice" && xeroInvoiceNumber
+      ? xeroInvoiceNumber
+      : fallbackQuoteNumber;
+    if (nextDocumentType === "draft_invoice" && xeroInvoiceNumberUnavailable) {
+      preview.warnings = [
+        ...preview.warnings,
+        {
+          count: 1,
+          label: "Invoice number not checked",
+          message: "Xero could not be checked. Review the suggested invoice number before sending.",
+          severity: "warning",
+          type: "invoice_number_xero_unavailable"
+        }
+      ];
+      preview.totals.warningCount = Number(preview.totals.warningCount || 0) + 1;
+    }
     const syncRunId = entries.find((entry) => entry.syncRunId)?.syncRunId || null;
 
     const insertResult = await database.query(
