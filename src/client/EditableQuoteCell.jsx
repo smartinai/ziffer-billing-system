@@ -43,7 +43,7 @@ export default function EditableQuoteCell({
   }
 
   return (
-    <div className="quote-inline-editor">
+    <div className="quote-inline-editor" data-inline-editor={`${lineId}:${field}`}>
       <input
         ref={inputRef}
         aria-label={ariaLabel}

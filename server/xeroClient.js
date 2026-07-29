@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { config } from "./config.js";
 import { getDatabasePool } from "./db.js";
+import { nextClientInvoiceNumber } from "../src/shared/invoiceNumbers.js";
 
 export const XERO_STATE_COOKIE = "ziffer_xero_oauth_state";
 
@@ -671,6 +672,47 @@ export async function findXeroDocumentByNumber({ documentNumber, documentType })
   return {
     ...transport,
     document: transport.mode === "live" ? transport.items?.[0] || null : null
+  };
+}
+
+export async function suggestNextXeroInvoiceNumber({ abbreviation, contactId, year }) {
+  if (!abbreviation || !contactId || !year) {
+    return {
+      connected: false,
+      invoiceNumber: "",
+      matchedInvoiceCount: 0,
+      mode: "unavailable",
+      status: "unavailable"
+    };
+  }
+
+  const transport = await fetchXeroCollection({
+    collectionKey: "Invoices",
+    endpoint: "/Invoices",
+    params: {
+      ContactIDs: contactId,
+      summaryOnly: true
+    },
+    paged: true
+  });
+  if (transport.mode !== "live") {
+    return {
+      ...transport,
+      invoiceNumber: "",
+      matchedInvoiceCount: 0
+    };
+  }
+
+  const invoiceNumbers = transport.items
+    .map((invoice) => invoice?.InvoiceNumber)
+    .filter(Boolean);
+  const invoiceNumber = nextClientInvoiceNumber({ abbreviation, invoiceNumbers, year });
+  const prefix = `${String(abbreviation).trim().toUpperCase()}-${year}-`;
+
+  return {
+    ...transport,
+    invoiceNumber,
+    matchedInvoiceCount: invoiceNumbers.filter((number) => String(number).toUpperCase().startsWith(prefix)).length
   };
 }
 
