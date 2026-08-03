@@ -89,6 +89,7 @@ export async function listAnnualInvoices(inputYear) {
           teamwork_project_id as "teamworkProjectId"
         from billing_clients
         where status = 'active'
+          and nullif(trim(xero_contact_id), '') is not null
         order by lower(display_name)
       `
     ),
@@ -140,6 +141,7 @@ export async function listAnnualInvoices(inputYear) {
         from billing_clients client
         join teamwork_time_entries entry on entry.project_id = client.teamwork_project_id
         where client.status = 'active'
+          and nullif(trim(client.xero_contact_id), '') is not null
           and lower(entry.task_name) like '%corporate records%'
       `
     )

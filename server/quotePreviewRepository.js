@@ -3455,6 +3455,7 @@ export async function sendQuotePreviewToXero(id, input = {}, actor = {}, interna
         amount,
         annualUsageApplied,
         annualCoveredAmount: financialMetrics.annualCoveredAmount,
+        clientName: billingClient.displayName,
         documentLabel,
         documentType,
         lineCount: xeroLineItems.length,

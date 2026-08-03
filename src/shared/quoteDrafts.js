@@ -127,7 +127,16 @@ function serviceForEntry(entry, services, servicesById, serviceOverridesByKey) {
   };
 }
 
-function warningDetails(type, count = 0) {
+function missingRatePeopleMessage(people = []) {
+  if (!people.length) return "";
+  const labels = people
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map(({ count, name }) => `${name} (${count} ${count === 1 ? "entry" : "entries"})`);
+  return ` Missing rates: ${labels.join("; ")}.`;
+}
+
+function warningDetails(type, count = 0, details = {}) {
   const labels = {
     invoiced_in_teamwork: ["Already linked in Teamwork", `${count} source ${count === 1 ? "entry is" : "entries are"} already linked to a Teamwork invoice.`],
     missing_service: ["Missing service", `${count} source ${count === 1 ? "entry needs" : "entries need"} a standardized service.`],
@@ -141,7 +150,7 @@ function warningDetails(type, count = 0) {
     unbillable_time: ["Unbillable time", `${count} source ${count === 1 ? "entry is" : "entries are"} marked unbillable.`],
     zero_rate: [
       "Missing person rate",
-      `${count} billed time ${count === 1 ? "entry has" : "entries have"} no person rate. Add a rate to include ${count === 1 ? "it" : "them"} in the document amount.`
+      `${count} billed time ${count === 1 ? "entry has" : "entries have"} no person rate.${missingRatePeopleMessage(details.people)} Add a rate to include ${count === 1 ? "it" : "them"} in the document amount.`
     ]
   };
   const [label, message] = labels[type] || [type, ""];
@@ -404,6 +413,7 @@ export function buildAggregatedQuotePreview({
   const discount = Number(client.discount || 0);
   const taxType = client.taxType || "";
   const warningCounts = new Map();
+  const zeroRatePeople = new Map();
   const lines = new Map();
   const annualUsageByKey = normalizeAnnualUsage(annualUsage);
   const servicesById = new Map(services.map((service) => [compactText(service.id), service]));
@@ -475,6 +485,8 @@ export function buildAggregatedQuotePreview({
       if (isBillable && !partAnnualCoverage && rate <= 0) {
         warnings.push("zero_rate");
         addWarningCount(warningCounts, "zero_rate");
+        const personName = compactText(entry.userName) || "Unknown person";
+        zeroRatePeople.set(personName, (zeroRatePeople.get(personName) || 0) + 1);
         totals.zeroRateHours += partHours;
       }
 
@@ -663,6 +675,10 @@ export function buildAggregatedQuotePreview({
     lines: quoteLines,
     period: { endDate: periodEnd, startDate: periodStart },
     totals,
-    warnings: [...warningCounts.entries()].map(([type, count]) => warningDetails(type, count))
+    warnings: [...warningCounts.entries()].map(([type, count]) => warningDetails(type, count, {
+      people: type === "zero_rate"
+        ? [...zeroRatePeople.entries()].map(([name, personCount]) => ({ count: personCount, name }))
+        : []
+    }))
   };
 }

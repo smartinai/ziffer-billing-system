@@ -36,6 +36,28 @@ test("billing user cannot access administrator operations API", async ({ page })
   await expect(page.getByRole("button", { name: "Operations" })).toHaveCount(0);
 });
 
+test("Teamwork sync shows progress and completion feedback", async ({ page }) => {
+  await login(page);
+  await page.getByRole("button", { name: "Overview" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "Overview" })).toBeVisible();
+
+  const report = await page.request.get("/api/reporting/summary?startDate=2026-01-01&endDate=2026-08-03").then((response) => response.json());
+  await page.route("**/api/reporting/refresh?**", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    await route.fulfill({ contentType: "application/json", json: report, status: 200 });
+  });
+
+  await page.getByRole("button", { name: "Sync Teamwork" }).click();
+  const dialog = page.getByRole("dialog", { name: "Sync in progress" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("Fetching users, projects, tasks and current-year time entries");
+  await expect(page.getByRole("button", { name: "Sync Teamwork" })).toBeDisabled();
+
+  await expect(page.getByRole("dialog", { name: "Sync complete" })).toBeVisible();
+  await page.getByRole("button", { name: "Done" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+});
+
 test("client display-name overrides appear in billing and reporting without changing the Teamwork project", async ({ page }) => {
   await login(page);
   const csrf = await page.request.get("/api/auth/csrf").then((response) => response.json());
