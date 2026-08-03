@@ -297,6 +297,16 @@ test("surfaces missing mapping, not-billed time, and zero-rate warnings", () => 
         id: "entry-2",
         isBillable: true,
         taskName: "Filing",
+        userName: "Maria Tkachenko",
+        userRate: 0
+      },
+      {
+        description: "",
+        hours: 1,
+        id: "entry-3",
+        isBillable: true,
+        taskName: "Review",
+        userName: "Alexander Tkachenko",
         userRate: 0
       }
     ],
@@ -311,12 +321,11 @@ test("surfaces missing mapping, not-billed time, and zero-rate warnings", () => 
   assert.ok(warningTypes.includes("missing_service"));
   assert.ok(warningTypes.includes("unbillable_time"));
   assert.ok(warningTypes.includes("zero_rate"));
-  assert.match(
-    preview.warnings.find((warning) => warning.type === "zero_rate").message,
-    /no person rate/
-  );
+  const zeroRateWarning = preview.warnings.find((warning) => warning.type === "zero_rate");
+  assert.equal(zeroRateWarning.count, 2);
+  assert.match(zeroRateWarning.message, /Missing rates: Alexander Tkachenko \(1 entry\); Maria Tkachenko \(1 entry\)\./);
   assert.equal(preview.totals.amount, 0);
-  assert.equal(preview.totals.zeroRateHours, 2);
+  assert.equal(preview.totals.zeroRateHours, 3);
 });
 
 test("marks matching annual invoice services as covered and removes them from the quote amount", () => {

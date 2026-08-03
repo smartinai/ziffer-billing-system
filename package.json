@@ -1,6 +1,6 @@
 {
   "name": "ziffer-billing-system",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,6 +13,7 @@
     "db:local:status": "node scripts/local-postgres.mjs status",
     "db:local:stop": "node scripts/local-postgres.mjs stop",
     "db:import-annual-invoices": "node scripts/import-annual-invoices.mjs",
+    "db:reconcile-annual-usage": "node scripts/reconcile-annual-usage.mjs",
     "db:import-teamwork-store": "node scripts/import-teamwork-store.mjs",
     "db:migrate": "node scripts/migrate.mjs",
     "db:production:backup": "node scripts/backup-production-db.mjs",
@@ -25,6 +26,7 @@
     "release:minor": "node scripts/prepare-release.mjs minor",
     "release:patch": "node scripts/prepare-release.mjs patch",
     "sync:teamwork:scheduled": "node scripts/sync-teamwork-scheduled.mjs",
+    "sync:teamwork:range": "node scripts/sync-teamwork-range.mjs",
     "start": "node server/index.js",
     "test": "node --test",
     "test:e2e": "playwright test",

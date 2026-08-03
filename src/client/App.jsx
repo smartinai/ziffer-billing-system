@@ -68,6 +68,7 @@ import { getBillingClients, getXeroReference, updateBillingClient } from "./api.
 import { formatAppDate, formatAppDateTime } from "./dateFormatting.js";
 import EditableQuoteCell from "./EditableQuoteCell.jsx";
 import ItemCodePicker from "./ItemCodePicker.jsx";
+import TeamworkSyncModal from "./TeamworkSyncModal.jsx";
 import {
   hasQuoteLineHoursOverride,
   hasQuoteLineValueOverride,
@@ -5122,6 +5123,7 @@ function Shell({ onLogout, onUserUpdated, user }) {
   const [navGroupsOpen, setNavGroupsOpen] = useState({ billing: true, reporting: true });
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [teamworkSyncFeedback, setTeamworkSyncFeedback] = useState({ error: "", open: false, phase: "idle" });
   const [error, setError] = useState("");
   const [accountModalOpen, setAccountModalOpen] = useState(false);
   const monthOptions = useMemo(() => dataMonthOptions(report?.yearTrend), [report?.yearTrend]);
@@ -5340,11 +5342,13 @@ function Shell({ onLogout, onUserUpdated, user }) {
     if (demoMode) return;
     setRefreshing(true);
     setError("");
+    setTeamworkSyncFeedback({ error: "", open: true, phase: "running" });
     try {
       setReport(await refreshSummary(range));
       setReportingSourceStatus(await getReportingSourceStatus());
+      setTeamworkSyncFeedback({ error: "", open: true, phase: "success" });
     } catch (err) {
-      setError(err.message);
+      setTeamworkSyncFeedback({ error: err.message, open: true, phase: "error" });
     } finally {
       setRefreshing(false);
     }
@@ -5647,6 +5651,14 @@ function Shell({ onLogout, onUserUpdated, user }) {
           user={user}
           onClose={() => setAccountModalOpen(false)}
           onSaved={onUserUpdated}
+        />
+      ) : null}
+      {teamworkSyncFeedback.open ? (
+        <TeamworkSyncModal
+          error={teamworkSyncFeedback.error}
+          onClose={() => setTeamworkSyncFeedback((current) => ({ ...current, open: false }))}
+          onRetry={handleRefresh}
+          phase={teamworkSyncFeedback.phase}
         />
       ) : null}
     </main>

@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-03
+
+- Added a Teamwork sync progress modal with elapsed time, completion feedback, and retryable errors.
+
+### Fixed
+
+- Xero send audit events now record the actual sent amount, document number, and client from the completed Xero send result.
+
+### Changed
+
+- Annual Invoices now lists only active Teamwork projects linked to a Xero contact.
+- Annual prepaid allowances can now be reconciled from the approved matrix while used hours are recalculated from Teamwork through June 2026, leaving July usage to the normal invoice workflow.
+
 ## [0.8.0] - 2026-08-03
 
 ### Added

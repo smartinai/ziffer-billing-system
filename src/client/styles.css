@@ -3203,6 +3203,111 @@ td strong {
   background: rgba(20, 20, 20, 0.38);
 }
 
+.teamwork-sync-backdrop {
+  z-index: 70;
+  backdrop-filter: blur(3px);
+}
+
+.teamwork-sync-modal {
+  width: min(520px, 100%);
+  overflow: hidden;
+  border: 1px solid #dfe7e5;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 24px 70px rgba(23, 40, 42, 0.24);
+}
+
+.teamwork-sync-modal-header {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 14px;
+  padding: 24px 26px 18px;
+}
+
+.teamwork-sync-modal-header h2 {
+  margin: 3px 0 0;
+  font-size: 25px;
+}
+
+.teamwork-sync-modal-icon {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  place-items: center;
+  border-radius: 50%;
+  background: #e9f4f4;
+  color: #367f88;
+}
+
+.teamwork-sync-modal-icon.success {
+  background: #edf8f1;
+  color: #367650;
+}
+
+.teamwork-sync-modal-icon.error {
+  background: #fff0ec;
+  color: #ad4735;
+}
+
+.teamwork-sync-modal-body {
+  padding: 0 26px 25px;
+  color: #55534e;
+  line-height: 1.55;
+}
+
+.teamwork-sync-modal-body p {
+  margin: 0;
+}
+
+.teamwork-sync-progress {
+  height: 8px;
+  margin: 22px 0 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e7eeee;
+}
+
+.teamwork-sync-progress span {
+  display: block;
+  width: 38%;
+  height: 100%;
+  border-radius: inherit;
+  background: #4f959e;
+  animation: teamwork-sync-progress 1.7s ease-in-out infinite;
+}
+
+.teamwork-sync-details {
+  display: flex;
+  justify-content: space-between;
+  color: #32747c;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.teamwork-sync-note {
+  margin-top: 18px !important;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: #f6f8f7;
+  color: #706e68;
+  font-size: 13px;
+}
+
+.teamwork-sync-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 16px 26px;
+  border-top: 1px solid #ebe8e2;
+  background: #fbfaf8;
+}
+
+@keyframes teamwork-sync-progress {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(275%); }
+}
+
 .quote-inline-cell {
   display: inline-flex;
   width: 100%;

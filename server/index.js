@@ -38,6 +38,7 @@ import {
   XERO_STATE_COOKIE
 } from "./xeroClient.js";
 import { getXeroReference, syncXeroReferenceData } from "./xeroReferenceRepository.js";
+import { xeroSendAuditMetadata } from "./xeroAudit.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const __filename = fileURLToPath(import.meta.url);
@@ -412,16 +413,7 @@ app.post("/api/billing/quote-previews/:id/send-to-xero", requireAuth, requireCsr
       actor: req.user,
       entityId: payload.xero?.xeroQuoteLogId || req.params.id,
       entityType: "xero_document",
-      metadata: {
-        clientName: payload.preview?.billingClient?.displayName,
-        documentNumber: payload.preview?.quoteNumber,
-        documentType: payload.xero?.documentType,
-        lineCount: payload.xero?.lineCount,
-        mode: payload.xero?.mode,
-        status: payload.xero?.status,
-        sentAmount: payload.preview?.amount,
-        summary: `Sent ${payload.xero?.documentLabel || "document"} ${payload.preview?.quoteNumber || ""} to Xero for ${payload.preview?.billingClient?.displayName || "client"} (${payload.preview?.amount ?? 0} EUR)`.trim()
-      }
+      metadata: xeroSendAuditMetadata(payload)
     });
     res.json(payload);
   } catch (error) {
