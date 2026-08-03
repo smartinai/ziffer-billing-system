@@ -13,12 +13,11 @@ async function login(page, email = adminEmail, password = adminPassword) {
 
 async function openInlineEditor(page, buttonName, inputLabel) {
   const input = page.locator(`input[aria-label="${inputLabel}"]`);
-  await expect(async () => {
-    if (!await input.isVisible().catch(() => false)) {
-      await page.getByRole("button", { name: buttonName }).click();
-    }
-    await expect(input).toBeVisible({ timeout: 1_000 });
-  }).toPass({ timeout: 10_000 });
+  if (!await input.isVisible().catch(() => false)) {
+    const button = page.getByRole("button", { name: buttonName });
+    if (await button.isVisible({ timeout: 500 }).catch(() => false)) await button.click();
+  }
+  await expect(input).toBeVisible();
   return input;
 }
 
@@ -87,6 +86,33 @@ test("client display-name overrides appear in billing and reporting without chan
     headers: { "x-csrf-token": csrf.csrfToken }
   });
   expect(restoreRole.ok()).toBeTruthy();
+});
+
+test("people and projects reporting expose reconciled money, hours, percentages, and metric help", async ({ page }) => {
+  await login(page);
+
+  await page.getByRole("button", { name: "People", exact: true }).click();
+  await expect(page.getByPlaceholder("Search people")).toBeVisible();
+  const peopleTable = page.locator("table.reporting-classification-table").first();
+  await expect(peopleTable.getByRole("button", { name: /^Teamwork:/ })).toBeVisible();
+  await expect(peopleTable.getByRole("button", { name: /^Billable hours:/ })).toBeVisible();
+  await expect(peopleTable.getByRole("button", { name: /^Non-billable hours:/ })).toBeVisible();
+  await expect(peopleTable.getByRole("button", { name: /^Write-offs:/ })).toBeVisible();
+  await expect(peopleTable.locator(".metric-stack").first().locator("strong")).toContainText("€");
+  await expect(peopleTable.locator(".metric-percentage").first()).toHaveText(/%$/);
+
+  const personRowButton = peopleTable.locator("tbody .project-row-button").first();
+  await expect(personRowButton).toBeVisible();
+  await personRowButton.click();
+  await expect(peopleTable.locator("tbody .project-people-card")).toBeVisible();
+
+  await page.getByRole("button", { name: "Projects", exact: true }).click();
+  await expect(page.getByPlaceholder("Search projects")).toBeVisible();
+  const projectsTable = page.locator("table.reporting-classification-table").first();
+  await expect(projectsTable.getByRole("button", { name: /^Teamwork:/ })).toBeVisible();
+  await expect(projectsTable.getByRole("button", { name: /^Client:/ })).toBeVisible();
+  await expect(projectsTable.getByRole("button", { name: /^Internal:/ })).toHaveCount(0);
+  await expect(projectsTable.locator(".metric-percentage").first()).toHaveText(/%$/);
 });
 
 test("logout and an expired browser session both return to sign in", async ({ context, page }) => {
@@ -228,7 +254,46 @@ test("draft financial state, locking, task billing, archive, and restore are dur
   await page.getByRole("dialog", { name: "Quote preview" }).getByRole("button", { name: "Archive" }).click();
   await expect(page.getByRole("heading", { level: 1, name: "Docs" })).toBeVisible();
   await expect(page.getByRole("heading", { level: 2, name: "Archived" })).toBeVisible();
-  await page.getByRole("row").filter({ hasText: "E2E VAT Client" }).getByRole("button", { name: "Restore" }).click();
+  await page.getByRole("heading", { level: 2, name: "Archived" })
+    .locator("xpath=ancestor::section")
+    .getByRole("button", { name: "Restore" })
+    .first()
+    .click();
   await expect(page).toHaveURL(new RegExp(`#billing-create-quote/${draftId}$`));
   await expect(page.getByText("0.15h", { exact: true }).first()).toBeVisible();
+});
+
+test("two unsent drafts may keep the same Xero document number", async ({ page }) => {
+  await login(page);
+
+  async function generateDraft() {
+    await page.getByRole("button", { name: "Create New" }).click();
+    await page.getByRole("combobox", { name: "Search clients" }).fill("E2E VAT Client");
+    await page.getByRole("option", { name: "E2E VAT Client E2E VAT Client" }).click();
+    await page.getByLabel("Start date").fill("2026-01-01");
+    await page.getByLabel("End date").fill("2026-01-31");
+    await page.getByRole("button", { name: "Generate Document" }).click();
+    await expect(page).toHaveURL(/#billing-create-quote\/[0-9a-f-]+$/);
+  }
+
+  async function archiveDraft() {
+    await page.getByRole("button", { name: "Preview", exact: true }).click();
+    const preview = page.getByRole("dialog", { name: "Invoice preview" });
+    await expect(preview).toBeVisible();
+    await preview.getByRole("button", { name: "Archive" }).click();
+    await expect(page.getByRole("heading", { level: 1, name: "Docs" })).toBeVisible();
+  }
+
+  await generateDraft();
+  const firstNumber = await page.getByLabel("Invoice number").inputValue();
+  await archiveDraft();
+
+  await generateDraft();
+  const secondNumberInput = page.getByLabel("Invoice number");
+  await secondNumberInput.fill(firstNumber);
+  await secondNumberInput.blur();
+  await expect(page.getByText("Saved", { exact: true })).toBeVisible();
+  await page.reload();
+  await expect(secondNumberInput).toHaveValue(firstNumber);
+  await archiveDraft();
 });

@@ -6,6 +6,7 @@ import {
   listTeamworkProjectDisplayNames
 } from "./billingClientRepository.js";
 import { enrichTimeEntriesWithTasks, normalizeProjects, normalizeTimeEntries, normalizeUsers } from "./normalizers.js";
+import { loadReportingClassificationContext } from "./reportingClassificationRepository.js";
 import { listReportingDocumentAggregates } from "./reportingDocumentAggregateRepository.js";
 import { fetchProjects, fetchTasks, fetchTimeEntries, fetchUsers, getTeamworkStatus } from "./teamworkClient.js";
 import { hasStoredReportingData, readTeamworkStore, writeTeamworkStore } from "./teamworkStore.js";
@@ -18,6 +19,10 @@ import {
   persistTeamworkStoreToDatabase,
   readTeamworkStoreFromDatabase
 } from "./teamworkRepository.js";
+import {
+  attachReportingClassifications,
+  buildReportingClassifications
+} from "../src/shared/reportingClassification.js";
 
 let sourceStatus = {
   coverageEnd: null,
@@ -465,6 +470,33 @@ async function buildStoredReport(store, startDate, endDate) {
     console.error(`Could not load reporting document aggregates: ${error.message}`);
   }
 
+  let classificationStatus = { available: false, warning: "" };
+  try {
+    const classificationContext = await loadReportingClassificationContext(startDate, endDate);
+    const classifications = buildReportingClassifications({
+      ...classificationContext,
+      allowedProjectIds: report.byProject.map((project) => String(project.id)),
+      endDate,
+      excludedProjectIds,
+      mariaRatePolicy: {
+        rolesByProject: mariaRolesByProject,
+        userId: config.mariaTeamworkUserId
+      },
+      projects: reportingProjects,
+      startDate,
+      timeEntries: store.timeEntries || [],
+      users: store.users || []
+    });
+    report = attachReportingClassifications(report, classifications);
+    classificationStatus = { available: true, warning: "" };
+  } catch (error) {
+    classificationStatus = {
+      available: false,
+      warning: error.message || "Reporting classifications are unavailable."
+    };
+    console.error(`Could not build reporting classifications: ${error.message}`);
+  }
+
   const storageWarnings = coverageWarnings(store, startDate, endDate);
   report.metadata = {
     ...report.metadata,
@@ -475,6 +507,7 @@ async function buildStoredReport(store, startDate, endDate) {
       coverageEnd: store.coverageEnd,
       coverageStart: store.coverageStart,
       documentAggregates: documentAggregateStatus,
+      classifications: classificationStatus,
       mode: "stored",
       database: store.database || null,
       storeSyncedAt: store.syncedAt,

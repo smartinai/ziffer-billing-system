@@ -976,6 +976,236 @@ td strong {
   min-width: 980px;
 }
 
+.reporting-classification-table {
+  min-width: 1480px;
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
+  overflow: hidden;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.detail-table.reporting-classification-table {
+  min-width: 1640px;
+}
+
+.reporting-classification-table th,
+.reporting-classification-table td {
+  min-width: 132px;
+}
+
+.table-panel > .table-wrap > table.reporting-classification-table > thead > tr > th,
+.table-panel > .table-wrap > table.reporting-classification-table > tbody > tr > td,
+.project-people-table.reporting-classification-table th,
+.project-people-table.reporting-classification-table td {
+  width: auto;
+}
+
+.reporting-classification-table th:first-child,
+.reporting-classification-table td:first-child {
+  min-width: 230px;
+}
+
+.reporting-classification-table .reporting-group-header th {
+  padding-top: 12px;
+  padding-bottom: 12px;
+  border-bottom: 0;
+  color: #27373a;
+  font-size: 11px;
+  text-align: center;
+}
+
+.reporting-classification-table .reporting-group-header th.reporting-identity-header {
+  text-align: left;
+}
+
+.reporting-classification-table .reporting-subheader th {
+  padding-top: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(52, 48, 42, 0.08);
+  text-align: center;
+  white-space: nowrap;
+}
+
+.reporting-header-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: inherit;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.reporting-header-info {
+  position: relative;
+  display: inline-grid;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #4f7378;
+  cursor: help;
+  place-items: center;
+}
+
+.reporting-header-info:hover,
+.reporting-header-info:focus-visible {
+  color: #367781;
+  outline: 1px dotted #4f959e;
+  outline-offset: 2px;
+}
+
+.reporting-header-tooltip {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 8px);
+  left: 50%;
+  display: block;
+  width: max-content;
+  max-width: 270px;
+  padding: 9px 11px;
+  border-radius: 7px;
+  background: #25363a;
+  box-shadow: 0 8px 24px rgba(25, 35, 37, 0.2);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: normal;
+  line-height: 1.4;
+  opacity: 0;
+  pointer-events: none;
+  text-align: left;
+  text-transform: none;
+  transform: translate(-50%, -3px);
+  transition: opacity 120ms ease, transform 120ms ease;
+  white-space: normal;
+}
+
+.reporting-header-info:hover .reporting-header-tooltip,
+.reporting-header-info:focus-visible .reporting-header-tooltip {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.reporting-classification-table th:first-child .reporting-header-tooltip {
+  left: 0;
+  transform: translate(0, -3px);
+}
+
+.reporting-classification-table th:first-child .reporting-header-info:hover .reporting-header-tooltip,
+.reporting-classification-table th:first-child .reporting-header-info:focus-visible .reporting-header-tooltip {
+  transform: translate(0, 0);
+}
+
+.reporting-classification-table th:last-child .reporting-header-tooltip {
+  right: 0;
+  left: auto;
+  transform: translate(0, -3px);
+}
+
+.reporting-classification-table th:last-child .reporting-header-info:hover .reporting-header-tooltip,
+.reporting-classification-table th:last-child .reporting-header-info:focus-visible .reporting-header-tooltip {
+  transform: translate(0, 0);
+}
+
+.metric-stack .metric-percentage {
+  margin-top: 1px;
+  color: #4f7378;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.metric-stack .metric-basis {
+  margin-top: 2px;
+  color: #8a857d;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.metric-stack .metric-basis--confirmed {
+  color: #28766f;
+}
+
+.metric-stack .metric-basis--mixed {
+  color: #8a6428;
+}
+
+.reporting-classification-table .reporting-group-header th[rowspan],
+.reporting-classification-table thead th.reporting-identity-header {
+  background: #f7f7f6;
+}
+
+.detail-table.reporting-classification-table:not(.reporting-classification-table--single-identity) tbody td:nth-child(-n + 2),
+.project-people-table.reporting-classification-table:not(.reporting-classification-table--single-identity) tbody td:nth-child(-n + 2),
+.reporting-classification-table--single-identity tbody td:first-child {
+  background: #fff;
+}
+
+.reporting-group--teamwork,
+.reporting-cell--teamwork {
+  background: #edf5f5;
+}
+
+.reporting-group--billable,
+.reporting-cell--billable {
+  background: #faf6ee;
+}
+
+.reporting-group--nonbillable,
+.reporting-cell--nonbillable {
+  background: #f3f3f2;
+}
+
+.reporting-classification-table .reporting-group-start {
+  border-left: 0;
+}
+
+.reporting-classification-table tbody tr {
+  transition: box-shadow 160ms ease;
+}
+
+.reporting-classification-table tbody tr + tr td {
+  border-top-color: rgba(52, 48, 42, 0.08);
+}
+
+.reporting-classification-table tbody tr:hover {
+  box-shadow: inset 3px 0 #4f959e;
+}
+
+.detail-table.reporting-classification-table:not(.reporting-classification-table--single-identity) tbody tr:hover td:nth-child(-n + 2),
+.project-people-table.reporting-classification-table:not(.reporting-classification-table--single-identity) tbody tr:hover td:nth-child(-n + 2),
+.reporting-classification-table--single-identity tbody tr:hover td:first-child {
+  background: #f8f9f9;
+}
+
+.detail-table.reporting-classification-table .project-detail-row > td {
+  padding-right: 0;
+  padding-left: 0;
+}
+
+.detail-table.reporting-classification-table .project-people-card {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.reporting-classification-table tbody tr:hover .reporting-cell--teamwork {
+  background: #e5f0f0;
+}
+
+.reporting-classification-table tbody tr:hover .reporting-cell--billable {
+  background: #f6efe2;
+}
+
+.reporting-classification-table tbody tr:hover .reporting-cell--nonbillable {
+  background: #ececea;
+}
+
 .detail-table--aggregate {
   min-width: 1120px;
 }

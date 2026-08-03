@@ -1,0 +1,1 @@
+drop index if exists idx_quote_previews_document_number_unique;
