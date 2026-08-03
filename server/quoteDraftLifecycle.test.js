@@ -121,21 +121,6 @@ test("draft advisory lock keys are scoped to the draft", () => {
   );
 });
 
-test("duplicate document numbers return a stable conflict response", () => {
-  const conflict = quoteDraftTestHooks.mapDocumentNumberConflict({
-    code: "23505",
-    constraint: "idx_quote_previews_document_number_unique"
-  });
-
-  assert.equal(conflict.statusCode, 409);
-  assert.equal(conflict.code, "DRAFT_DOCUMENT_NUMBER_CONFLICT");
-});
-
-test("unrelated unique violations are not rewritten as document conflicts", () => {
-  const error = { code: "23505", constraint: "xero_quotes_idempotency_key_key" };
-  assert.equal(quoteDraftTestHooks.mapDocumentNumberConflict(error), error);
-});
-
 test("Xero retries keep one stable idempotency key per draft and document type", () => {
   const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   assert.equal(

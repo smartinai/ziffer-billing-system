@@ -5,13 +5,13 @@ import crypto from "node:crypto";
 import { config } from "./config.js";
 import { getDatabasePool } from "./db.js";
 import { openAlertIncident, resolveAlertIncident } from "./operationsRepository.js";
+import { recordInvoiceWriteOffAllocations } from "./reportingClassificationRepository.js";
 import { fetchTask } from "./teamworkClient.js";
 import { findXeroDocumentByNumber, sendQuoteRequestToXero, suggestNextXeroInvoiceNumber } from "./xeroClient.js";
 import { buildXeroDocumentPreview } from "./xeroDocumentPreview.js";
 
 const validDate = /^\d{4}-\d{2}-\d{2}$/;
 const validUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const documentNumberUniqueIndex = "idx_quote_previews_document_number_unique";
 
 function draftLockKey(id) {
   return `quote-draft:${id}`;
@@ -33,14 +33,6 @@ async function releaseDraftSessionLock(database, id) {
   await database.query("select pg_advisory_unlock(hashtextextended($1::text, 0))", [draftLockKey(id)]);
 }
 
-function mapDocumentNumberConflict(error) {
-  if (error?.code !== "23505" || error?.constraint !== documentNumberUniqueIndex) return error;
-  return draftError(
-    "That document number is already used by another draft. Choose a different number and try again.",
-    409,
-    "DRAFT_DOCUMENT_NUMBER_CONFLICT"
-  );
-}
 function actorUserId(actor) {
   return compactText(actor?.userId || actor?.id);
 }
@@ -356,7 +348,6 @@ export const quoteDraftTestHooks = {
   assertEditableQuoteLinePatch,
   assertDraftMutation,
   draftLockKey,
-  mapDocumentNumberConflict,
   ambiguousXeroError,
   quoteLineSourceSnapshot,
   requestedTimeEntryIds,
@@ -2096,7 +2087,7 @@ export async function createQuotePreview({ billingClientId, documentType, editor
     });
   } catch (error) {
     await database.query("rollback");
-    throw mapDocumentNumberConflict(error);
+    throw error;
   } finally {
     database.release();
   }
@@ -2764,7 +2755,7 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
     };
   } catch (error) {
     await database.query("rollback");
-    throw mapDocumentNumberConflict(error);
+    throw error;
   } finally {
     database.release();
   }
@@ -3379,6 +3370,13 @@ export async function sendQuotePreviewToXero(id, input = {}, actor = {}, interna
       ]
     );
     const xeroQuoteRow = xeroQuoteResult.rows[0];
+    const writeOffEntryCount = sendMode === "live" && documentType === "draft_invoice"
+      ? await recordInvoiceWriteOffAllocations(database, {
+          actorUserId: access.userId,
+          previewId: id,
+          xeroQuoteId: xeroQuoteRow.id
+        })
+      : 0;
 
     await database.query(
       `
@@ -3419,7 +3417,8 @@ export async function sendQuotePreviewToXero(id, input = {}, actor = {}, interna
           xeroDocumentId,
           xeroLineCount: xeroLineItems.length,
           xeroQuoteId,
-          xeroQuoteLogId: xeroQuoteRow.id
+          xeroQuoteLogId: xeroQuoteRow.id,
+          writeOffEntryCount
         })
       ]
     );
@@ -3468,7 +3467,8 @@ export async function sendQuotePreviewToXero(id, input = {}, actor = {}, interna
         teamworkEstimateAmount: financialMetrics.teamworkEstimateAmount,
         xeroDocumentId,
         xeroQuoteId,
-        xeroQuoteLogId: xeroQuoteRow.id
+        xeroQuoteLogId: xeroQuoteRow.id,
+        writeOffEntryCount
       }
     };
   } catch (error) {

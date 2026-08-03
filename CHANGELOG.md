@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-03
+
+### Added
+
+- People and Projects reporting now shows an hours-based percentage beneath every monetary and hours metric, using Total Teamwork hours as the row baseline.
+- Reporting table headers now include accessible explanations of each metric and its calculation.
+- Reporting now loads entry-level allocations from successfully sent Xero invoices and keeps confirmed billed and prepaid results separate from Teamwork estimates.
+- People and Projects reporting now displays the effective blend of confirmed Xero allocations and remaining Teamwork estimates, marking only confirmed and partly confirmed values to keep the tables uncluttered.
+- Reporting metric tooltips use concise definitions that are easier to scan.
+- Multiple unsent drafts may share the same suggested document number; Xero remains authoritative when sending.
+
 ## [0.7.0] - 2026-07-29
 
 ### Added

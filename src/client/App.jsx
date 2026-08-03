@@ -9,6 +9,7 @@ import {
   Eye,
   Euro,
   FileText,
+  Info,
   Loader2,
   LockKeyhole,
   LogOut,
@@ -79,6 +80,7 @@ import {
 import XeroDocumentPreviewModal from "./XeroDocumentPreviewModal.jsx";
 import { appVersionLabel } from "./version.js";
 import { mariaRoleOptions } from "../shared/mariaRoleRates.js";
+import { formatReportingMetricPercentage, reportingMetricBasis } from "../shared/reportingPresentation.js";
 
 const OperationsView = lazy(() => import("./OperationsView.jsx"));
 
@@ -88,19 +90,24 @@ const reportingTabs = [
   { id: "reporting-projects", label: "Projects", icon: BriefcaseBusiness }
 ];
 
-const reportingDataModes = [
-  { value: "teamwork", label: "Teamwork data" },
-  { value: "aggregate", label: "Aggregate data" }
-];
-
 const reportingSortOptions = {
-  teamwork: [
-    { value: "billableAmount", label: "Billable amount" },
-    { value: "billableHours", label: "Billable hours" },
-    { value: "totalAmount", label: "Total amount" },
-    { value: "totalHours", label: "Total hours" },
-    { value: "unbillableAmount", label: "Unbillable amount" },
-    { value: "billablePercent", label: "Billable %" },
+  people: [
+    { value: "totalTeamwork", label: "Total Teamwork" },
+    { value: "totalBillable", label: "Total billable" },
+    { value: "prepaid", label: "Prepaid" },
+    { value: "effectiveBillable", label: "Billable" },
+    { value: "writeOffs", label: "Write-offs" },
+    { value: "nonBillable", label: "Non-billable" },
+    { value: "internalNonBillable", label: "Internal non-billable" },
+    { value: "name", label: "Name A-Z" }
+  ],
+  projects: [
+    { value: "totalTeamwork", label: "Total Teamwork" },
+    { value: "totalBillable", label: "Total billable" },
+    { value: "prepaid", label: "Prepaid" },
+    { value: "effectiveBillable", label: "Billable" },
+    { value: "writeOffs", label: "Write-offs" },
+    { value: "nonBillable", label: "Non-billable" },
     { value: "name", label: "Name A-Z" }
   ],
   aggregate: [
@@ -112,10 +119,10 @@ const reportingSortOptions = {
   ]
 };
 
-const reportingDataModeValues = reportingDataModes.map((mode) => mode.value);
 const reportingSortValues = {
   aggregate: reportingSortOptions.aggregate.map((option) => option.value),
-  teamwork: reportingSortOptions.teamwork.map((option) => option.value)
+  people: reportingSortOptions.people.map((option) => option.value),
+  projects: reportingSortOptions.projects.map((option) => option.value)
 };
 
 const billingTabs = [
@@ -366,6 +373,9 @@ function compareReportingNames(a = {}, b = {}) {
 
 function reportingSortValue(row = {}, dataMode, sortKey) {
   if (sortKey === "name") return String(row.name || "").toLowerCase();
+  if (row.hourClassification?.[sortKey]) {
+    return Number(row.hourClassification[sortKey].amount || 0);
+  }
 
   if (dataMode === "aggregate") {
     if (sortKey === "teamworkEstimateAmount") return metricFromAggregate(row, "teamworkEstimate").amount;
@@ -392,34 +402,173 @@ function sortReportingRows(rows = [], dataMode, sortKey) {
   });
 }
 
-function MetricStack({ metric }) {
+const classificationHeaderHelp = {
+  person: "Person whose Teamwork time is summarized.",
+  project: "Project whose Teamwork time is summarized.",
+  teamwork: "All logged Teamwork time; the baseline for percentages.",
+  billableHours: "Time marked billable in Teamwork; unmarked values are estimates.",
+  nonBillableHours: "Time marked non-billable in Teamwork.",
+  total: "All logged time and its estimated value.",
+  totalBillable: "All time marked billable in Teamwork.",
+  prepaid: "Billable time covered by a prepaid allowance; Xero overrides estimates.",
+  fixedFees: "Fixed-fee time; classification is not configured yet.",
+  billable: "Confirmed Xero billing plus estimates not yet invoiced.",
+  writeOffs: "Billable time excluded from a sent invoice.",
+  client: "Non-billable time on projects linked to a Xero client.",
+  internal: "Non-billable time outside Xero-linked client projects."
+};
+
+function ReportingHeaderLabel({ description, label }) {
   return (
-    <span className="metric-stack">
-      <strong>{formatHours(metric?.hours || 0)}</strong>
-      <span>{currency.format(metric?.amount || 0)}</span>
+    <span className="reporting-header-label">
+      <span>{label}</span>
+      <button
+        aria-label={`${label}: ${description}`}
+        className="reporting-header-info"
+        type="button"
+      >
+        <Info aria-hidden="true" size={12} strokeWidth={2.25} />
+        <span className="reporting-header-tooltip" role="tooltip">{description}</span>
+      </button>
     </span>
   );
 }
 
-function ReportingDataModeToggle({ onChange, value }) {
+function MetricStack({ basis, metric, totalTeamworkHours }) {
   return (
-    <div className="reporting-mode-toggle" aria-label="Reporting data mode">
-      {reportingDataModes.map((mode) => (
-        <button
-          aria-pressed={value === mode.value}
-          key={mode.value}
-          onClick={() => onChange(mode.value)}
-          type="button"
-        >
-          {mode.label}
-        </button>
-      ))}
-    </div>
+    <span className="metric-stack">
+      <strong>{currency.format(metric?.amount || 0)}</strong>
+      <span>{formatHours(metric?.hours || 0)}</span>
+      <span className="metric-percentage">
+        {formatReportingMetricPercentage(metric?.hours, totalTeamworkHours)}
+      </span>
+      {basis ? (
+        <span className={`metric-basis metric-basis--${basis === "Confirmed" ? "confirmed" : "mixed"}`}>
+          {basis}
+        </span>
+      ) : null}
+    </span>
   );
 }
 
-function ReportingSortSelect({ dataMode, label, onChange, value }) {
-  const options = reportingSortOptions[dataMode] || reportingSortOptions.teamwork;
+function ClassificationTableColGroup({ includeCount = true, includeInternal = false }) {
+  const metricCount = includeInternal ? 8 : 7;
+  const primaryWidth = includeCount ? (includeInternal ? 22 : 28) : 34;
+  const countWidth = includeCount ? 6 : 0;
+  const metricWidth = (100 - primaryWidth - countWidth) / metricCount;
+
+  return (
+    <colgroup>
+      <col style={{ width: `${primaryWidth}%` }} />
+      {includeCount ? <col style={{ width: `${countWidth}%` }} /> : null}
+      {Array.from({ length: metricCount }, (_, index) => (
+        <col key={index} style={{ width: `${metricWidth}%` }} />
+      ))}
+    </colgroup>
+  );
+}
+
+function ClassificationTableHeaders({ includeCount = false, includeInternal = false, primaryLabel, secondaryLabel }) {
+  const primaryHelp = primaryLabel === "Person" ? classificationHeaderHelp.person : classificationHeaderHelp.project;
+
+  return (
+    <>
+      <tr className="reporting-group-header">
+        <th className="reporting-identity-header" rowSpan="2">
+          <ReportingHeaderLabel description={primaryHelp} label={primaryLabel} />
+        </th>
+        {includeCount ? (
+          <th className="reporting-identity-header" rowSpan="2">
+            <ReportingHeaderLabel
+              description={`Number of ${String(secondaryLabel || "").toLowerCase()} represented by this row.`}
+              label={secondaryLabel}
+            />
+          </th>
+        ) : null}
+        <th className="reporting-group reporting-group--teamwork" colSpan="1">
+          <ReportingHeaderLabel description={classificationHeaderHelp.teamwork} label="Teamwork" />
+        </th>
+        <th className="reporting-group reporting-group--billable" colSpan="5">
+          <ReportingHeaderLabel description={classificationHeaderHelp.billableHours} label="Billable hours" />
+        </th>
+        <th className="reporting-group reporting-group--nonbillable" colSpan={includeInternal ? 2 : 1}>
+          <ReportingHeaderLabel description={classificationHeaderHelp.nonBillableHours} label="Non-billable hours" />
+        </th>
+      </tr>
+      <tr className="reporting-subheader">
+        <th className="reporting-group-start reporting-cell--teamwork">
+          <ReportingHeaderLabel description={classificationHeaderHelp.total} label="Total" />
+        </th>
+        <th className="reporting-group-start reporting-cell--billable">
+          <ReportingHeaderLabel description={classificationHeaderHelp.totalBillable} label="Total billable" />
+        </th>
+        <th className="reporting-cell--billable">
+          <ReportingHeaderLabel description={classificationHeaderHelp.prepaid} label="Prepaid" />
+        </th>
+        <th className="reporting-cell--billable">
+          <ReportingHeaderLabel description={classificationHeaderHelp.fixedFees} label="Fixed fees" />
+        </th>
+        <th className="reporting-cell--billable">
+          <ReportingHeaderLabel description={classificationHeaderHelp.billable} label="Billable" />
+        </th>
+        <th className="reporting-cell--billable">
+          <ReportingHeaderLabel description={classificationHeaderHelp.writeOffs} label="Write-offs" />
+        </th>
+        <th className="reporting-group-start reporting-cell--nonbillable">
+          <ReportingHeaderLabel description={classificationHeaderHelp.client} label="Client" />
+        </th>
+        {includeInternal ? (
+          <th className="reporting-cell--nonbillable">
+            <ReportingHeaderLabel description={classificationHeaderHelp.internal} label="Internal" />
+          </th>
+        ) : null}
+      </tr>
+    </>
+  );
+}
+
+function ClassificationTableCells({ classification = {}, includeInternal = false }) {
+  const totalTeamworkHours = Number(classification.totalTeamwork?.hours || 0);
+  const metric = (name) => ({
+    basis: reportingMetricBasis(classification, name),
+    metric: classification[name],
+    totalTeamworkHours
+  });
+
+  return (
+    <>
+      <td className="reporting-group-start reporting-cell--teamwork">
+        <MetricStack {...metric("totalTeamwork")} />
+      </td>
+      <td className="reporting-group-start reporting-cell--billable">
+        <MetricStack {...metric("totalBillable")} />
+      </td>
+      <td className="reporting-cell--billable">
+        <MetricStack {...metric("prepaid")} />
+      </td>
+      <td className="reporting-cell--billable">
+        <MetricStack {...metric("fixedFees")} />
+      </td>
+      <td className="reporting-cell--billable">
+        <MetricStack {...metric("effectiveBillable")} />
+      </td>
+      <td className="reporting-cell--billable">
+        <MetricStack {...metric("writeOffs")} />
+      </td>
+      <td className="reporting-group-start reporting-cell--nonbillable">
+        <MetricStack {...metric("nonBillable")} />
+      </td>
+      {includeInternal ? (
+        <td className="reporting-cell--nonbillable">
+          <MetricStack {...metric("internalNonBillable")} />
+        </td>
+      ) : null}
+    </>
+  );
+}
+
+function ReportingSortSelect({ label, onChange, scope, value }) {
+  const options = reportingSortOptions[scope] || reportingSortOptions.projects;
 
   return (
     <select
@@ -470,27 +619,13 @@ function useStoredStringPreference(storageKey, defaultValue, validValues = []) {
 }
 
 function useReportingPreferences(scope) {
-  const [dataMode, setDataMode] = useStoredStringPreference(
-    `ziffer.reporting.${scope}.dataMode`,
-    "teamwork",
-    reportingDataModeValues
-  );
   const [teamworkSortKey, setTeamworkSortKey] = useStoredStringPreference(
     `ziffer.reporting.${scope}.teamworkSort`,
-    "billableAmount",
-    reportingSortValues.teamwork
-  );
-  const [aggregateSortKey, setAggregateSortKey] = useStoredStringPreference(
-    `ziffer.reporting.${scope}.aggregateSort`,
-    "teamworkEstimateAmount",
-    reportingSortValues.aggregate
+    "totalTeamwork",
+    reportingSortValues[scope]
   );
 
   return {
-    aggregateSortKey,
-    dataMode,
-    setAggregateSortKey,
-    setDataMode,
     setTeamworkSortKey,
     teamworkSortKey
   };
@@ -1571,18 +1706,15 @@ function ReportingAmountChart({ entityLabel, rows }) {
 
 function PeopleView({ rows }) {
   const [query, setQuery] = useState("");
-  const { aggregateSortKey, dataMode, setAggregateSortKey, setDataMode, setTeamworkSortKey, teamworkSortKey } =
-    useReportingPreferences("people");
-  const sortKey = dataMode === "aggregate" ? aggregateSortKey : teamworkSortKey;
-  const setSortKey = dataMode === "aggregate" ? setAggregateSortKey : setTeamworkSortKey;
+  const { setTeamworkSortKey, teamworkSortKey } = useReportingPreferences("people");
   const visibleRows = useMemo(
     () =>
       sortReportingRows(
         rows.filter((row) => String(row.name || "").toLowerCase().includes(query.trim().toLowerCase())),
-        dataMode,
-        sortKey
+        "teamwork",
+        teamworkSortKey
       ),
-    [dataMode, query, rows, sortKey]
+    [query, rows, teamworkSortKey]
   );
 
   return (
@@ -1590,15 +1722,19 @@ function PeopleView({ rows }) {
       <section className="panel full-panel">
         <div className="table-toolbar reporting-table-toolbar">
           <div className="toolbar-actions">
-            <ReportingDataModeToggle value={dataMode} onChange={setDataMode} />
-            <ReportingSortSelect dataMode={dataMode} label="Sort people" onChange={setSortKey} value={sortKey} />
+            <ReportingSortSelect
+              label="Sort people"
+              onChange={setTeamworkSortKey}
+              scope="people"
+              value={teamworkSortKey}
+            />
             <label className="search-field">
               <Search size={16} />
               <input placeholder="Search people" value={query} onChange={(event) => setQuery(event.target.value)} />
             </label>
           </div>
         </div>
-        <DetailTable rows={visibleRows} type="users" dataMode={dataMode} />
+        <DetailTable rows={visibleRows} type="users" />
       </section>
       <article className="panel reporting-chart-panel">
         <ReportingAmountChart rows={rows} entityLabel="person" />
@@ -1609,18 +1745,15 @@ function PeopleView({ rows }) {
 
 function ProjectsView({ rows }) {
   const [query, setQuery] = useState("");
-  const { aggregateSortKey, dataMode, setAggregateSortKey, setDataMode, setTeamworkSortKey, teamworkSortKey } =
-    useReportingPreferences("projects");
-  const sortKey = dataMode === "aggregate" ? aggregateSortKey : teamworkSortKey;
-  const setSortKey = dataMode === "aggregate" ? setAggregateSortKey : setTeamworkSortKey;
+  const { setTeamworkSortKey, teamworkSortKey } = useReportingPreferences("projects");
   const visibleRows = useMemo(
     () =>
       sortReportingRows(
         rows.filter((row) => String(row.name || "").toLowerCase().includes(query.trim().toLowerCase())),
-        dataMode,
-        sortKey
+        "teamwork",
+        teamworkSortKey
       ),
-    [dataMode, query, rows, sortKey]
+    [query, rows, teamworkSortKey]
   );
 
   return (
@@ -1628,15 +1761,19 @@ function ProjectsView({ rows }) {
       <section className="panel full-panel">
         <div className="table-toolbar reporting-table-toolbar">
           <div className="toolbar-actions">
-            <ReportingDataModeToggle value={dataMode} onChange={setDataMode} />
-            <ReportingSortSelect dataMode={dataMode} label="Sort projects" onChange={setSortKey} value={sortKey} />
+            <ReportingSortSelect
+              label="Sort projects"
+              onChange={setTeamworkSortKey}
+              scope="projects"
+              value={teamworkSortKey}
+            />
             <label className="search-field">
               <Search size={16} />
               <input placeholder="Search projects" value={query} onChange={(event) => setQuery(event.target.value)} />
             </label>
           </div>
         </div>
-        <DetailTable rows={visibleRows} type="clients" dataMode={dataMode} />
+        <DetailTable rows={visibleRows} type="clients" />
       </section>
       <article className="panel reporting-chart-panel">
         <ReportingAmountChart rows={rows} entityLabel="project" />
@@ -1645,63 +1782,22 @@ function ProjectsView({ rows }) {
   );
 }
 
-function ProjectPeopleCard({ dataMode = "teamwork", project }) {
+function ProjectPeopleCard({ project }) {
   const people = project.peopleBreakdown || [];
-  const isAggregate = dataMode === "aggregate";
 
   return (
     <article className="project-people-card" id={detailCardId(project)}>
-      <div className="project-people-card-heading">
-        <div>
-          <p>People involved</p>
-          <h3>{project.name}</h3>
-        </div>
-        <span>{`${people.length} ${people.length === 1 ? "person" : "people"}`}</span>
-      </div>
       {people.length ? (
         <div className="project-people-table-wrap">
-          <table className={`project-people-table ${isAggregate ? "project-people-table--aggregate" : ""}`}>
-            <thead>
-              <tr>
-                <th>Person</th>
-                {isAggregate ? (
-                  <>
-                    <th>Teamwork estimate</th>
-                    <th>Excluding pre-paid</th>
-                    <th>Sent to Xero</th>
-                    <th>Paid in Xero</th>
-                  </>
-                ) : (
-                  <>
-                    <th>Total</th>
-                    <th>Unbillable</th>
-                    <th>Billable</th>
-                    <th>Billable %</th>
-                  </>
-                )}
-              </tr>
-            </thead>
+          <table className="project-people-table reporting-classification-table reporting-classification-table--single-identity">
+            <ClassificationTableColGroup includeCount={false} />
             <tbody>
               {people.map((person) => (
                 <tr key={person.id}>
                   <td>
                     <UserIdentity user={person} meta={formatEntryCount(person.entryCount)} />
                   </td>
-                  {isAggregate ? (
-                    <>
-                      <td><MetricStack metric={metricFromAggregate(person, "teamworkEstimate")} /></td>
-                      <td><MetricStack metric={metricFromAggregate(person, "excludingPrepaid")} /></td>
-                      <td><MetricStack metric={metricFromAggregate(person, "sentToXero")} /></td>
-                      <td><MetricStack metric={metricFromAggregate(person, "paidInXero")} /></td>
-                    </>
-                  ) : (
-                    <>
-                      <td><MetricStack metric={metricFromTotals(person.totals, "all")} /></td>
-                      <td><MetricStack metric={metricFromTotals(person.totals, "unbillable")} /></td>
-                      <td><MetricStack metric={metricFromTotals(person.totals)} /></td>
-                      <td>{person.totals.billablePercent}%</td>
-                    </>
-                  )}
+                  <ClassificationTableCells classification={person.hourClassification} />
                 </tr>
               ))}
             </tbody>
@@ -1714,42 +1810,15 @@ function ProjectPeopleCard({ dataMode = "teamwork", project }) {
   );
 }
 
-function PersonProjectsCard({ dataMode = "teamwork", person }) {
+function PersonProjectsCard({ person }) {
   const projects = person.projectBreakdown || [];
-  const isAggregate = dataMode === "aggregate";
 
   return (
     <article className="project-people-card" id={detailCardId(person, "person")}>
-      <div className="project-people-card-heading">
-        <div>
-          <p>Projects worked on</p>
-          <h3>{person.name}</h3>
-        </div>
-        <span>{`${projects.length} ${projects.length === 1 ? "project" : "projects"}`}</span>
-      </div>
       {projects.length ? (
         <div className="project-people-table-wrap">
-          <table className={`project-people-table ${isAggregate ? "project-people-table--aggregate" : ""}`}>
-            <thead>
-              <tr>
-                <th>Project</th>
-                {isAggregate ? (
-                  <>
-                    <th>Teamwork estimate</th>
-                    <th>Excluding pre-paid</th>
-                    <th>Sent to Xero</th>
-                    <th>Paid in Xero</th>
-                  </>
-                ) : (
-                  <>
-                    <th>Total</th>
-                    <th>Unbillable</th>
-                    <th>Billable</th>
-                    <th>Billable %</th>
-                  </>
-                )}
-              </tr>
-            </thead>
+          <table className="project-people-table reporting-classification-table reporting-classification-table--single-identity">
+            <ClassificationTableColGroup includeCount={false} includeInternal />
             <tbody>
               {projects.map((project) => (
                 <tr key={project.id}>
@@ -1759,21 +1828,7 @@ function PersonProjectsCard({ dataMode = "teamwork", person }) {
                       <span>{formatEntryCount(project.entryCount)}</span>
                     </div>
                   </td>
-                  {isAggregate ? (
-                    <>
-                      <td><MetricStack metric={metricFromAggregate(project, "teamworkEstimate")} /></td>
-                      <td><MetricStack metric={metricFromAggregate(project, "excludingPrepaid")} /></td>
-                      <td><MetricStack metric={metricFromAggregate(project, "sentToXero")} /></td>
-                      <td><MetricStack metric={metricFromAggregate(project, "paidInXero")} /></td>
-                    </>
-                  ) : (
-                    <>
-                      <td><MetricStack metric={metricFromTotals(project.totals, "all")} /></td>
-                      <td><MetricStack metric={metricFromTotals(project.totals, "unbillable")} /></td>
-                      <td><MetricStack metric={metricFromTotals(project.totals)} /></td>
-                      <td>{project.totals.billablePercent}%</td>
-                    </>
-                  )}
+                  <ClassificationTableCells classification={project.hourClassification} includeInternal />
                 </tr>
               ))}
             </tbody>
@@ -1786,10 +1841,9 @@ function PersonProjectsCard({ dataMode = "teamwork", person }) {
   );
 }
 
-function DetailTable({ dataMode = "teamwork", rows, type }) {
+function DetailTable({ rows, type }) {
   const isUsers = type === "users";
-  const isAggregate = dataMode === "aggregate";
-  const colSpan = 6;
+  const colSpan = isUsers ? 9 : 8;
   const [expandedRowId, setExpandedRowId] = useState("");
 
   useEffect(() => {
@@ -1800,27 +1854,17 @@ function DetailTable({ dataMode = "teamwork", rows, type }) {
 
   return (
     <div className="table-wrap">
-      <table className={`detail-table ${isAggregate ? "detail-table--aggregate" : ""}`}>
+      <table
+        className="detail-table reporting-classification-table reporting-classification-table--single-identity"
+      >
+        <ClassificationTableColGroup includeCount={false} includeInternal={isUsers} />
         <thead>
-          <tr>
-            <th>{isUsers ? "Person" : "Project"}</th>
-            <th>{isUsers ? "Projects" : "People"}</th>
-            {isAggregate ? (
-              <>
-                <th>Teamwork estimate</th>
-                <th>Excluding pre-paid</th>
-                <th>Sent to Xero</th>
-                <th>Paid in Xero</th>
-              </>
-            ) : (
-              <>
-                <th>Total</th>
-                <th>Unbillable</th>
-                <th>Billable</th>
-                <th>Billable %</th>
-              </>
-            )}
-          </tr>
+          <ClassificationTableHeaders
+            includeCount={false}
+            includeInternal={isUsers}
+            primaryLabel={isUsers ? "Person" : "Project"}
+            secondaryLabel={isUsers ? "Projects" : "People"}
+          />
         </thead>
         <tbody>
           {rows.map((row) => {
@@ -1838,7 +1882,12 @@ function DetailTable({ dataMode = "teamwork", rows, type }) {
                         onClick={() => setExpandedRowId(expanded ? "" : row.id)}
                         type="button"
                       >
-                        <UserIdentity user={row} meta={row.email} />
+                        <UserIdentity
+                          user={row}
+                          meta={`${formatEntryCount(row.entryCount)} - ${row.projectCount || 0} ${
+                            (row.projectCount || 0) === 1 ? "project" : "projects"
+                          }`}
+                        />
                       </button>
                     ) : (
                       <button
@@ -1849,34 +1898,26 @@ function DetailTable({ dataMode = "teamwork", rows, type }) {
                         type="button"
                       >
                         <strong>{row.name}</strong>
-                        <span>{formatEntryCount(row.entryCount)}</span>
+                        <span>
+                          {`${formatEntryCount(row.entryCount)} - ${row.userCount || 0} ${
+                            (row.userCount || 0) === 1 ? "person" : "people"
+                          }`}
+                        </span>
                       </button>
                     )}
                   </td>
-                  <td>{isUsers ? row.projectCount || 0 : row.userCount || 0}</td>
-                  {isAggregate ? (
-                    <>
-                      <td><MetricStack metric={metricFromAggregate(row, "teamworkEstimate")} /></td>
-                      <td><MetricStack metric={metricFromAggregate(row, "excludingPrepaid")} /></td>
-                      <td><MetricStack metric={metricFromAggregate(row, "sentToXero")} /></td>
-                      <td><MetricStack metric={metricFromAggregate(row, "paidInXero")} /></td>
-                    </>
-                  ) : (
-                    <>
-                      <td><MetricStack metric={metricFromTotals(row.totals, "all")} /></td>
-                      <td><MetricStack metric={metricFromTotals(row.totals, "unbillable")} /></td>
-                      <td><MetricStack metric={metricFromTotals(row.totals)} /></td>
-                      <td>{row.totals.billablePercent}%</td>
-                    </>
-                  )}
+                  <ClassificationTableCells
+                    classification={row.hourClassification}
+                    includeInternal={isUsers}
+                  />
                 </tr>
                 {expanded ? (
                   <tr className="project-detail-row">
                     <td colSpan={colSpan}>
                       {isUsers ? (
-                        <PersonProjectsCard person={row} dataMode={dataMode} />
+                        <PersonProjectsCard person={row} />
                       ) : (
-                        <ProjectPeopleCard project={row} dataMode={dataMode} />
+                        <ProjectPeopleCard project={row} />
                       )}
                     </td>
                   </tr>
