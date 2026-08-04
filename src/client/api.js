@@ -304,6 +304,19 @@ export function updateQuotePreview(id, input) {
   });
 }
 
+export function getTaskNameAiCapability() {
+  if (demoMode) return Promise.resolve({ enabled: false, model: "" });
+  return request("/api/billing/task-name-ai");
+}
+
+export function suggestQuoteTaskNames(previewId, input) {
+  if (demoMode) return Promise.resolve({ enabled: false, suggestions: [], version: input.version });
+  return request(`/api/billing/quote-previews/${previewId}/task-name-suggestions`, {
+    body: JSON.stringify(input),
+    method: "POST"
+  });
+}
+
 export function updateQuoteTimeEntryBillable(previewId, entryId, isBillable, lifecycle = {}) {
   if (demoMode) {
     return Promise.resolve({ preview: null });

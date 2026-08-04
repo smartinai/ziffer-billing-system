@@ -6,6 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-04
+
+- Allow invoice wording to be entered manually when AI cannot suggest a replacement task name.
+
+### Added
+
+- Draft editors can generate AI-assisted, client-facing task names in bulk or from an individual task, review and edit every suggestion, and apply only selected changes.
+- Original Teamwork task names and AI provenance remain visible and durable after edits, while accepted wording flows through the existing Xero preview and send projection.
+
+### Changed
+
+- The AI task-name review uses a compact comparison queue with bulk selection, changed-only filtering, lighter rows, and a clearer selected-name count.
+- AI task-name suggestions are prepared in sequential 15-task batches, appear as each batch finishes, and preserve completed results when a later batch needs to be retried.
+
 ## [0.9.0] - 2026-08-03
 
 - Added a Teamwork sync progress modal with elapsed time, completion feedback, and retryable errors.

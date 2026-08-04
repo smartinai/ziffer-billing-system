@@ -30,7 +30,9 @@ export default defineConfig({
       ...process.env,
       PORT: String(port),
       COOKIE_SECURE: "false",
-      NODE_ENV: "test"
+      NODE_ENV: "test",
+      AI_TASK_NAME_MOCK: "true",
+      AI_TASK_NAME_REWRITING_ENABLED: "true"
     }
   }
 });

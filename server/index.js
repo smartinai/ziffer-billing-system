@@ -24,6 +24,7 @@ import {
   updateQuotePreviewMetadata,
   updateQuotePreviewTimeEntryBillable
 } from "./quotePreviewRepository.js";
+import { suggestQuoteTaskNames, taskNameSuggestionCapability } from "./quoteTaskNameSuggestions.js";
 import { getReportingSummary, getSourceStatus, refreshStoredReportingSummary } from "./reportingService.js";
 import { operationsRouter } from "./routes/operationsRoutes.js";
 import { securityHeaders } from "./securityHeaders.js";
@@ -291,6 +292,10 @@ app.get("/api/billing/quote-previews", requireAuth, async (req, res, next) => {
   }
 });
 
+app.get("/api/billing/task-name-ai", requireAuth, (_req, res) => {
+  res.json(taskNameSuggestionCapability());
+});
+
 app.get("/api/billing/quote-previews/:id", requireAuth, async (req, res, next) => {
   try {
     res.json(await getArchivedQuoteDraft(req.params.id));
@@ -343,22 +348,34 @@ app.patch("/api/billing/quote-previews/:id", requireAuth, requireCsrf, async (re
     const lineUpdates = Array.isArray(req.body?.lines) ? req.body.lines : [];
     const removedRows = lineUpdates.filter((line) => line?.id && line.remove === true).length;
     const manualRowsAdded = lineUpdates.filter((line) => line && !line.id).length;
+    const aiNamesApplied = lineUpdates.filter((line) => line?.id && line.taskNameOrigin === "ai" && line.taskName).length;
     await recordAuditEvent({
-      action: lineUpdates.length ? "document_rows_update" : "document_metadata_update",
+      action: aiNamesApplied ? "document_task_names_ai_update" : lineUpdates.length ? "document_rows_update" : "document_metadata_update",
       actor: req.user,
       entityId: req.params.id,
       entityType: "quote_preview",
       metadata: {
         documentNumber: payload.preview?.quoteNumber,
         lineUpdateCount: lineUpdates.length,
+        aiNamesApplied,
         manualRowsAdded,
         removedRows,
-        summary: lineUpdates.length
+        summary: aiNamesApplied
+          ? `Applied ${aiNamesApplied} AI-assisted task name${aiNamesApplied === 1 ? "" : "s"} to ${payload.preview?.quoteNumber || "document"}`
+          : lineUpdates.length
           ? `${removedRows ? `Removed ${removedRows} document row${removedRows === 1 ? "" : "s"} from ` : manualRowsAdded ? `Added ${manualRowsAdded} manual row${manualRowsAdded === 1 ? "" : "s"} to ` : `Updated ${lineUpdates.length} document row${lineUpdates.length === 1 ? "" : "s"} on `}${payload.preview?.quoteNumber || "document"}`
           : `Updated document metadata ${payload.preview?.quoteNumber || ""}`.trim()
       }
     });
     res.json(payload);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/billing/quote-previews/:id/task-name-suggestions", requireAuth, requireCsrf, async (req, res, next) => {
+  try {
+    res.json(await suggestQuoteTaskNames(req.params.id, req.body || {}, req.user));
   } catch (error) {
     next(error);
   }

@@ -81,6 +81,8 @@ function splitScopes(value) {
 }
 
 export const config = {
+  aiTaskNameMock: !isProduction && process.env.AI_TASK_NAME_MOCK === "true",
+  aiTaskNameRewritingEnabled: process.env.AI_TASK_NAME_REWRITING_ENABLED === "true",
   cacheTtlMs: Number(process.env.CACHE_TTL_MS || 15 * 60 * 1000),
   cookieSecure: process.env.COOKIE_SECURE ? process.env.COOKIE_SECURE === "true" : isProduction,
   currency: process.env.DEFAULT_CURRENCY || "EUR",
@@ -89,6 +91,9 @@ export const config = {
   defaultStartDate: process.env.DEFAULT_START_DATE || "2026-01-01",
   isProduction,
   mariaTeamworkUserId: process.env.MARIA_TEAMWORK_USER_ID || "",
+  openAiApiKey: process.env.OPENAI_API_KEY || "",
+  openAiTaskNameModel: process.env.OPENAI_TASK_NAME_MODEL || "gpt-5.6-terra",
+  openAiTaskNameTimeoutMs: Math.max(5_000, Number(process.env.OPENAI_TASK_NAME_TIMEOUT_MS || 45_000)),
   pageDelayMs: Math.max(0, Number(process.env.TEAMWORK_PAGE_DELAY_MS || 350)),
   pageSize: Number(process.env.TEAMWORK_PAGE_SIZE || 100),
   port,

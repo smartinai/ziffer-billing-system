@@ -110,6 +110,79 @@ test("client display-name overrides appear in billing and reporting without chan
   expect(restoreRole.ok()).toBeTruthy();
 });
 
+test("AI task-name review provides compact bulk review controls", async ({ page }) => {
+  await login(page);
+  await page.getByRole("button", { name: "Create New" }).click();
+  await page.getByRole("combobox", { name: "Search clients" }).fill("E2E VAT Client");
+  await page.getByRole("option", { name: "E2E VAT Client E2E VAT Client" }).click();
+  await page.getByLabel("Start date").fill("2026-01-01");
+  await page.getByLabel("End date").fill("2026-01-31");
+  await page.getByRole("button", { name: "Generate Document" }).click();
+  await page.route("**/api/billing/quote-previews/*/task-name-suggestions", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const response = await route.fetch();
+    const payload = await response.json();
+    payload.suggestions[0] = {
+      ...payload.suggestions[0],
+      status: "unchanged",
+      suggestedTaskName: payload.suggestions[0].currentTaskName,
+      warning: "No suggestion was returned."
+    };
+    await route.fulfill({ response, json: payload });
+  });
+  await page.getByRole("button", { name: "Improve names with AI" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Review task names" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("progressbar", { name: "Preparing task names" })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Preparing…" })).toBeDisabled();
+  await expect(dialog.locator(".task-name-review-columns")).toContainText("Original Teamwork name");
+  await expect(dialog.getByRole("progressbar", { name: "Preparing task names" })).toHaveCount(0);
+  await expect(dialog.locator(".task-name-review-columns")).toContainText("Invoice wording");
+  const totalCount = await dialog.locator(".task-name-review-row").count();
+  expect(totalCount).toBeGreaterThan(1);
+
+  const noResponseRow = dialog.locator(".task-name-review-row").first();
+  const noResponseWording = noResponseRow.getByRole("textbox", { name: "Invoice wording" });
+  const noResponseSelection = noResponseRow.getByRole("checkbox", { name: /Use invoice wording/ });
+  await expect(noResponseWording).toBeEnabled();
+  await expect(noResponseSelection).toBeDisabled();
+  await expect(noResponseRow).toContainText("Enter the invoice wording manually if needed.");
+
+  const changedOnly = dialog.getByRole("checkbox", { name: /Show changed only/ });
+  await changedOnly.check();
+  await expect(dialog.locator(".task-name-review-row")).toHaveCount(totalCount - 1);
+  await changedOnly.uncheck();
+
+  await noResponseWording.fill("Manually entered invoice wording.");
+  await expect(noResponseSelection).toBeEnabled();
+  await expect(noResponseSelection).toBeChecked();
+
+  await dialog.getByRole("button", { name: "Deselect all" }).click();
+  await expect(dialog.getByRole("button", { name: "Apply 0 task names" })).toBeDisabled();
+  await dialog.getByRole("button", { name: "Select all changes" }).click();
+  await expect(dialog.getByRole("button", { name: new RegExp(`Apply ${totalCount} task names?`) })).toBeEnabled();
+
+  await changedOnly.check();
+  await expect(dialog.locator(".task-name-review-row")).toHaveCount(totalCount);
+  await dialog.getByRole("button", { name: "How AI task names are processed" }).focus();
+  await expect(dialog.getByRole("tooltip")).toBeVisible();
+
+  await page.setViewportSize({ width: 412, height: 915 });
+  await expect(dialog.locator(".task-name-review-columns")).toBeHidden();
+  await expect(dialog.locator(".task-name-review-field-label").first()).toBeVisible();
+  const mobileLayout = await dialog.evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+    viewportWidth: window.innerWidth
+  }));
+  expect(mobileLayout.clientWidth).toBeLessThanOrEqual(mobileLayout.viewportWidth);
+  expect(mobileLayout.scrollWidth).toBeLessThanOrEqual(mobileLayout.clientWidth + 1);
+  await expect(dialog.getByRole("button", { name: new RegExp(`Apply ${totalCount} task names?`) })).toBeVisible();
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+});
+
 test("people and projects reporting expose reconciled money, hours, percentages, and metric help", async ({ page }) => {
   await login(page);
 
@@ -176,6 +249,16 @@ test("draft financial state, locking, task billing, archive, and restore are dur
   });
   expect(blockedLock.status()).toBe(423);
   await expect(blockedLock.json()).resolves.toMatchObject({ code: "DRAFT_LOCKED", details: { editorName: "E2E Administrator" } });
+  const blockedSuggestions = await secondPage.request.post(`/api/billing/quote-previews/${draftId}/task-name-suggestions`, {
+    headers: { "x-csrf-token": csrfToken },
+    data: {
+      editorSessionId: "00000000-0000-4000-8000-000000000002",
+      lineIds: ["00000000-0000-4000-8000-000000000099"],
+      version: 1
+    }
+  });
+  expect(blockedSuggestions.status()).toBe(423);
+  await expect(blockedSuggestions.json()).resolves.toMatchObject({ code: "DRAFT_LOCKED" });
   await secondContext.close();
 
   const taskBillableButton = page.getByRole("button", { name: "Mark task as billable: E2E Unbillable Task" });
@@ -248,10 +331,35 @@ test("draft financial state, locking, task billing, archive, and restore are dur
   const sourceTaskActions = page.getByRole("button", { name: "Actions for E2E Unbillable Task" });
   await sourceTaskActions.click();
   await expect(page.getByRole("menuitem", { name: "Mark unbillable" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Improve name with AI" })).toBeVisible();
   await expect(page.getByRole("menuitem", { name: "Mark task unbillable" })).toHaveCount(0);
   await sourceTaskActions.click();
 
+  await page.getByRole("button", { name: "Improve names with AI" }).click();
+  const taskNameDialog = page.getByRole("dialog", { name: "Review task names" });
+  await expect(taskNameDialog).toBeVisible();
+  await expect(taskNameDialog.getByText("E2E Unbillable Task", { exact: true })).toBeVisible();
+  await expect(taskNameDialog.getByRole("button", { name: "Select all changes" })).toBeVisible();
+  await taskNameDialog.getByRole("button", { name: "Deselect all" }).click();
+  await expect(taskNameDialog.getByRole("button", { name: "Apply 0 task names" })).toBeDisabled();
+  await taskNameDialog.getByRole("button", { name: "Select all changes" }).click();
+  const changedSuggestionCount = await taskNameDialog.locator(".task-name-review-row").count();
+  expect(changedSuggestionCount).toBeGreaterThan(0);
+  await taskNameDialog.getByRole("checkbox", { name: /Show changed only/ }).check();
+  await expect(taskNameDialog.locator(".task-name-review-row")).toHaveCount(changedSuggestionCount);
+  const vatSuggestionRow = taskNameDialog.locator(".task-name-review-row").filter({ hasText: "VAT / Value added tax 2026" });
+  for (const textarea of await vatSuggestionRow.locator("textarea").all()) {
+    await textarea.fill("Review and preparation of the 2026 VAT filing.");
+  }
+  await taskNameDialog.getByRole("button", { name: /Apply \d+ task names/ }).click();
+  await expect(taskNameDialog).toHaveCount(0);
+  const renamedVatRow = page.locator("tr.quote-task-row").filter({ hasText: "Review and preparation of the 2026 VAT filing." }).first();
+  await expect(renamedVatRow.locator(".quote-task-entry-count")).toHaveText("1");
+  await expect(renamedVatRow.locator(".quote-task-name-text")).toHaveText("Review and preparation of the 2026 VAT filing.");
+  await expect(renamedVatRow.locator(".quote-task-meta .quote-task-original-name")).toHaveText("VAT / Value added tax 2026");
+
   await page.getByRole("button", { name: "Actions for E2E Inline Row" }).click();
+  await expect(page.getByRole("menuitem", { name: "Improve name with AI" })).toHaveCount(0);
   await page.getByRole("menuitem", { name: "Remove" }).click();
   await expect(page.getByText("E2E Inline Row", { exact: true })).toHaveCount(0);
 
@@ -270,6 +378,7 @@ test("draft financial state, locking, task billing, archive, and restore are dur
   await expect(previewDialog).toBeVisible();
   await expect(previewDialog.getByText("Amounts are tax exclusive")).toBeVisible();
   await expect(previewDialog.getByText("0.15", { exact: true })).toBeVisible();
+  await expect(previewDialog.getByText(/Review and preparation of the 2026 VAT filing\./)).toBeVisible();
   await expect(previewDialog.getByRole("button", { name: "Send to Xero" })).toBeVisible();
   await previewDialog.getByLabel("Xero document type").selectOption("draft_quote");
   await expect(page.getByRole("dialog", { name: "Quote preview" })).toBeVisible();

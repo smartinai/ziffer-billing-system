@@ -24,6 +24,9 @@ DATABASE_URL=postgres://ziffer:ziffer_local_password@127.0.0.1:55432/ziffer_bill
 DATABASE_SSL=false
 SESSION_SECRET=replace-with-a-long-random-secret-before-vps
 XERO_TOKEN_ENCRYPTION_KEY=replace-with-a-long-random-secret-before-vps
+AI_TASK_NAME_REWRITING_ENABLED=false
+OPENAI_API_KEY=replace-with-openai-api-key
+OPENAI_TASK_NAME_MODEL=gpt-5.6-terra
 ```
 
 6. Start the local database and apply migrations:
@@ -61,6 +64,8 @@ When `NODE_ENV=production`, the server refuses to start unless these are set to 
 
 For HTTPS deployments, cookies are marked secure by default. Keep `COOKIE_SECURE=true` on the VPS.
 
+AI-assisted draft task names are opt-in. Keep `AI_TASK_NAME_REWRITING_ENABLED=false` until `OPENAI_API_KEY` is stored in the server's ignored `.env` file. The API key is used only by the Node server and is never sent to the browser. Suggestion requests send task names and time-entry descriptions without hours, rates, or assigned-user fields, and request `store: false` from the OpenAI Responses API.
+
 For VPS deployment, use [docs/VPS_DEPLOYMENT_SECURITY.md](docs/VPS_DEPLOYMENT_SECURITY.md) and copy `production.env.example` to `.env` on the server.
 
 Production monitoring, encrypted off-site backups, restore drills, approved deployments, and rollbacks are documented in [docs/OPERATIONS_RUNBOOK.md](docs/OPERATIONS_RUNBOOK.md).
@@ -72,6 +77,7 @@ Production monitoring, encrypted off-site backups, restore drills, approved depl
 - Stored Teamwork data lives in `data/teamwork-store.json` and is local only.
 - Use the dashboard's `Sync Teamwork` button to refresh stored Teamwork data on each computer. New syncs write to both `data/teamwork-store.json` and PostgreSQL.
 - GitHub contains the app code only, not Teamwork credentials or live Teamwork data.
+- OpenAI credentials stay in `.env`; never paste them into source files, screenshots, issue trackers, or chat messages.
 
 ## Checks
 
