@@ -19,6 +19,7 @@ import {
   Search,
   Send,
   ShieldCheck,
+  Sparkles,
   X,
   UserRound,
   UsersRound
@@ -45,6 +46,7 @@ import {
   getBillingQuotes,
   getSession,
   getSummary,
+  getTaskNameAiCapability,
   getReportingSourceStatus,
   getQuoteDrafts,
   getXeroStatus,
@@ -56,6 +58,7 @@ import {
   renewQuoteDraft,
   restoreQuoteDraft,
   sendQuoteToXero,
+  suggestQuoteTaskNames,
   syncBillingQuotesXeroStatus,
   syncBillingQuoteXeroStatus,
   updateAnnualInvoiceUsage,
@@ -69,6 +72,13 @@ import { formatAppDate, formatAppDateTime } from "./dateFormatting.js";
 import EditableQuoteCell from "./EditableQuoteCell.jsx";
 import ItemCodePicker from "./ItemCodePicker.jsx";
 import TeamworkSyncModal from "./TeamworkSyncModal.jsx";
+import TaskNameReviewModal from "./TaskNameReviewModal.jsx";
+import {
+  mergeTaskNameSuggestions,
+  remainingTaskNameLineIds,
+  taskNameSuggestionBatches,
+  uniqueTaskNameLineIds
+} from "./taskNameSuggestionBatches.js";
 import {
   hasQuoteLineHoursOverride,
   hasQuoteLineValueOverride,
@@ -2752,6 +2762,15 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
   const [xeroPreviewDocument, setXeroPreviewDocument] = useState(null);
   const [xeroDocumentType, setXeroDocumentType] = useState(preview.documentType || "draft_invoice");
   const [xeroStatus, setXeroStatus] = useState(null);
+  const [taskNameAiCapability, setTaskNameAiCapability] = useState({ enabled: false, loading: true, model: "" });
+  const [taskNameReviewOpen, setTaskNameReviewOpen] = useState(false);
+  const [taskNameReviewLineIds, setTaskNameReviewLineIds] = useState([]);
+  const [taskNameSuggestions, setTaskNameSuggestions] = useState([]);
+  const [taskNamePromptVersion, setTaskNamePromptVersion] = useState("");
+  const [taskNameSuggestionLoading, setTaskNameSuggestionLoading] = useState(false);
+  const [taskNameSuggestionProgress, setTaskNameSuggestionProgress] = useState({ completed: 0, label: "", total: 0 });
+  const [taskNameSuggestionError, setTaskNameSuggestionError] = useState("");
+  const [taskNameSuggestionsApplying, setTaskNameSuggestionsApplying] = useState(false);
   const [metadata, setMetadata] = useState(() => ({
     expiryDate: preview.expiryDate || "",
     quoteNumber: preview.quoteNumber || "",
@@ -2768,6 +2787,10 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
   );
   const annualItems = useMemo(() => annualCoverageItems(quoteLines), [quoteLines]);
   const annualInvoiced = useMemo(() => annualInvoicedItems(quoteLines), [quoteLines]);
+  const aiEligibleLines = useMemo(
+    () => quoteLines.filter((line) => line.sourceType !== "manual" && (line.entries?.length || line.sourceTimeEntryIds?.length)),
+    [quoteLines]
+  );
   const visibleWarnings = quoteWarnings.filter((warning) => warning.type !== "missing_service");
   const [metadataError, setMetadataError] = useState("");
   const [metadataSaving, setMetadataSaving] = useState(false);
@@ -2800,6 +2823,10 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
     lastFailedOperationRef.current = null;
     lastSaveErrorRef.current = null;
     pendingSaveCountRef.current = 0;
+    setTaskNameReviewOpen(false);
+    setTaskNameReviewLineIds([]);
+    setTaskNameSuggestions([]);
+    setTaskNameSuggestionError("");
   }, [preview.id]);
 
   useEffect(() => {
@@ -2848,6 +2875,20 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
         if (!cancelled) setXeroStatus({ configured: false, connected: false, status: "unknown" });
       });
 
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    getTaskNameAiCapability()
+      .then((capability) => {
+        if (!cancelled) setTaskNameAiCapability({ ...capability, loading: false });
+      })
+      .catch(() => {
+        if (!cancelled) setTaskNameAiCapability({ enabled: false, loading: false, model: "" });
+      });
     return () => {
       cancelled = true;
     };
@@ -3137,7 +3178,11 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
     try {
       const payload = await runDraftMutation((lifecycle) => updateQuotePreview(preview.id, {
         ...lifecycle,
-        lines: [{ id: line.id, [current.field]: value }]
+        lines: [{
+          id: line.id,
+          [current.field]: value,
+          ...(current.field === "taskName" ? { taskNameOrigin: "manual" } : {})
+        }]
       }));
       mergeLinePreviewUpdate(payload.preview || {});
       const nextCell = pendingInlineCellRef.current;
@@ -3389,6 +3434,118 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
     }
   }
 
+  async function requestTaskNameSuggestionBatch(lineIds) {
+    const requestSuggestions = () => suggestQuoteTaskNames(preview.id, lifecycleInput({ lineIds }));
+    try {
+      return await requestSuggestions();
+    } catch (error) {
+      if (error.code !== "DRAFT_LOCKED") throw error;
+      await reacquireEditorLock();
+      return requestSuggestions();
+    }
+  }
+
+  async function loadTaskNameSuggestions(lineIds, {
+    append = false,
+    completedCount = 0,
+    replace = false,
+    totalCount = 0
+  } = {}) {
+    const uniqueLineIds = uniqueTaskNameLineIds(lineIds);
+    if (!uniqueLineIds.length) return;
+    const batches = taskNameSuggestionBatches(uniqueLineIds);
+    const progressTotal = replace ? uniqueLineIds.length : Math.max(totalCount || uniqueLineIds.length, uniqueLineIds.length);
+    let completedThisRun = 0;
+    setTaskNameSuggestionLoading(true);
+    setTaskNameSuggestionError("");
+    setTaskNameSuggestionProgress({
+      completed: replace ? 0 : completedCount,
+      label: replace ? "Regenerating task name" : append ? "Retrying remaining task names" : "Preparing task names",
+      total: progressTotal
+    });
+    if (!replace && !append) setTaskNameSuggestions([]);
+    try {
+      for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+        const batch = batches[batchIndex];
+        setTaskNameSuggestionProgress((current) => ({
+          ...current,
+          label: replace
+            ? "Regenerating task name"
+            : `${append ? "Retrying" : "Preparing"} batch ${batchIndex + 1} of ${batches.length}`
+        }));
+        const payload = await requestTaskNameSuggestionBatch(batch);
+        const incoming = payload.suggestions || [];
+        completedThisRun += batch.length;
+        const completed = Math.min((replace ? 0 : completedCount) + completedThisRun, progressTotal);
+        setTaskNameSuggestionProgress((current) => ({ ...current, completed }));
+        if (payload.promptVersion) setTaskNamePromptVersion(payload.promptVersion);
+        if (payload.model) setTaskNameAiCapability({ enabled: true, loading: false, model: payload.model });
+        setTaskNameSuggestions((current) => mergeTaskNameSuggestions(current, incoming));
+      }
+    } catch (error) {
+      const completed = Math.min((replace ? 0 : completedCount) + completedThisRun, progressTotal);
+      setTaskNameSuggestionProgress((current) => ({ ...current, completed }));
+      setTaskNameSuggestionError(completed > 0 && !replace
+        ? `${completed} of ${progressTotal} task names are ready. ${error.message} Retry the remaining ${progressTotal - completed}.`
+        : error.message);
+    } finally {
+      setTaskNameSuggestionLoading(false);
+    }
+  }
+
+  async function openTaskNameReview(linesToReview) {
+    if (!preview.id || quoteIsLocked || !taskNameAiCapability.enabled) return;
+    const lineIds = linesToReview.map((line) => line.id).filter(Boolean);
+    if (!lineIds.length) return;
+    setOpenActionMenuKey("");
+    setTaskNameReviewLineIds(lineIds);
+    setTaskNameSuggestions([]);
+    setTaskNameSuggestionError("");
+    setTaskNameSuggestionProgress({ completed: 0, label: "Saving current draft", total: lineIds.length });
+    setTaskNameReviewOpen(true);
+    setTaskNameSuggestionLoading(true);
+    try {
+      await flushPendingChanges();
+      await loadTaskNameSuggestions(lineIds);
+    } catch (error) {
+      setTaskNameSuggestionError(error.message);
+      setTaskNameSuggestionLoading(false);
+    }
+  }
+
+  function retryTaskNameSuggestions() {
+    const remainingLineIds = remainingTaskNameLineIds(taskNameReviewLineIds, taskNameSuggestions);
+    if (!remainingLineIds.length) return;
+    loadTaskNameSuggestions(remainingLineIds, {
+      append: true,
+      completedCount: taskNameReviewLineIds.length - remainingLineIds.length,
+      totalCount: taskNameReviewLineIds.length
+    });
+  }
+
+  async function applyTaskNameSuggestions(rows, promptVersion) {
+    if (!rows.length || quoteIsLocked) return;
+    setTaskNameSuggestionsApplying(true);
+    setTaskNameSuggestionError("");
+    try {
+      const payload = await runDraftMutation((lifecycle) => updateQuotePreview(preview.id, {
+        ...lifecycle,
+        lines: rows.map((row) => ({
+          id: row.lineId,
+          taskName: row.suggestedTaskName,
+          taskNameOrigin: row.status === "suggested" ? "ai" : "manual",
+          ...(row.status === "suggested" ? { taskNamePromptVersion: promptVersion } : {})
+        }))
+      }));
+      mergeLinePreviewUpdate(payload.preview || {});
+      setTaskNameReviewOpen(false);
+    } catch (error) {
+      setTaskNameSuggestionError(error.message);
+    } finally {
+      setTaskNameSuggestionsApplying(false);
+    }
+  }
+
   async function loadXeroPreview(documentType = xeroDocumentType, version = versionRef.current) {
     setXeroPreviewLoading(true);
     setSendError("");
@@ -3593,6 +3750,16 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
 
         <div className="quote-line-toolbar">
           <button
+            className="secondary-action-button task-name-ai-button"
+            disabled={quoteIsLocked || taskNameAiCapability.loading || !taskNameAiCapability.enabled || !aiEligibleLines.length}
+            title={!taskNameAiCapability.loading && !taskNameAiCapability.enabled ? "Add the OpenAI API key to enable AI-assisted task names." : "Review AI suggestions for Teamwork task names."}
+            type="button"
+            onClick={() => openTaskNameReview(aiEligibleLines)}
+          >
+            <Sparkles size={17} />
+            Improve names with AI
+          </button>
+          <button
             className="secondary-action-button"
             disabled={quoteIsLocked}
             type="button"
@@ -3620,6 +3787,7 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
               {quoteLines.map((line) => {
                 const key = quoteLineKey(line);
                 const entries = line.entries || [];
+                const entryCount = entries.length || line.sourceTimeEntryIds?.length || 0;
                 const isOpen = openLineKeys.has(key);
                 const lineActionKey = `line:${key}`;
                 const canMarkLineBillable = entries.some((entry) => !entry.isBillable);
@@ -3671,18 +3839,35 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
                             onMove={moveInlineEdit}
                           >
                             <span className="quote-inline-task-label">
-                              <strong>{line.taskName || line.description || "No task"}</strong>
-                              <small>{formatEntryCount(entries.length || line.sourceTimeEntryIds?.length || 0)}</small>
+                              <strong>
+                                <span
+                                  className="quote-task-entry-count"
+                                  title={`${entryCount} time ${entryCount === 1 ? "entry" : "entries"}`}
+                                >
+                                  {entryCount}
+                                </span>
+                                <span className="quote-task-name-text">{line.taskName || line.description || "No task"}</span>
+                              </strong>
                             </span>
                           </EditableQuoteCell>
-                          <ItemCodePicker
-                            busy={savingLineIds.has(line.id)}
-                            disabled={quoteIsLocked}
-                            itemCode={line.itemCode || ""}
-                            items={xeroItems}
-                            onSelect={(itemCode) => saveLineItemCode(line, itemCode)}
-                            taskName={line.taskName || line.description}
-                          />
+                          <div className="quote-task-meta">
+                            <ItemCodePicker
+                              busy={savingLineIds.has(line.id)}
+                              disabled={quoteIsLocked}
+                              itemCode={line.itemCode || ""}
+                              items={xeroItems}
+                              onSelect={(itemCode) => saveLineItemCode(line, itemCode)}
+                              taskName={line.taskName || line.description}
+                            />
+                            {line.originalTaskName && line.originalTaskName !== line.taskName ? (
+                              <>
+                                <span aria-hidden="true" className="quote-task-meta-separator">–</span>
+                                <small className="quote-task-original-name" title={line.originalTaskName}>
+                                  {line.originalTaskName}
+                                </small>
+                              </>
+                            ) : null}
+                          </div>
                           </div>
                         </div>
                       </td>
@@ -3763,6 +3948,10 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
                       <td className="quote-action-cell">
                         <QuoteActionMenu
                           actions={[
+                            ...(line.sourceType !== "manual" && taskNameAiCapability.enabled ? [{
+                              label: "Improve name with AI",
+                              onClick: () => openTaskNameReview([line])
+                            }] : []),
                             ...(canMarkLineUnbillable ? [{
                               label: "Mark unbillable",
                               onClick: () => setLineBillable(line, false)
@@ -3867,6 +4056,22 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
         </div>
       </section>
 
+      {taskNameReviewOpen ? (
+        <TaskNameReviewModal
+          applying={taskNameSuggestionsApplying}
+          error={taskNameSuggestionError}
+          loading={taskNameSuggestionLoading}
+          model={taskNameAiCapability.model}
+          progress={taskNameSuggestionProgress}
+          promptVersion={taskNamePromptVersion}
+          suggestions={taskNameSuggestions}
+          totalTaskCount={taskNameReviewLineIds.length}
+          onApply={applyTaskNameSuggestions}
+          onClose={() => !taskNameSuggestionsApplying && setTaskNameReviewOpen(false)}
+          onRegenerate={(lineId) => loadTaskNameSuggestions([lineId], { replace: true })}
+          onRetry={retryTaskNameSuggestions}
+        />
+      ) : null}
       {xeroPreviewOpen ? (
         <XeroDocumentPreviewModal
           busy={sendingToXero || metadataSaving}
@@ -4193,6 +4398,7 @@ const auditActionLabels = {
   billing_client_update: "Billing client updated",
   document_metadata_update: "Document metadata updated",
   document_preview_create: "Document preview created",
+  document_task_names_ai_update: "AI task names applied",
   document_rows_update: "Document rows updated",
   login: "Login",
   login_failed: "Failed login",

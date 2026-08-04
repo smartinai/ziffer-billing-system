@@ -304,6 +304,12 @@ function assertEditableQuoteLinePatch(line = {}) {
   if (Object.hasOwn(line, "taskName") && !compactText(line.taskName)) {
     throw draftError("Task name is required.", 400, "TASK_NAME_REQUIRED");
   }
+  if (Object.hasOwn(line, "taskNameOrigin") && !["ai", "manual"].includes(line.taskNameOrigin)) {
+    throw draftError("Task-name origin is invalid.", 400, "TASK_NAME_ORIGIN_INVALID");
+  }
+  if (Object.hasOwn(line, "taskNamePromptVersion") && line.taskNameOrigin !== "ai") {
+    throw draftError("Prompt provenance is only valid for an AI-assisted task name.", 400, "TASK_NAME_PROMPT_INVALID");
+  }
 }
 
 function requestedTimeEntryIds(input = {}) {
@@ -328,6 +334,7 @@ function quoteLineSourceSnapshot(line = {}) {
 
 function savedQuoteLine(row = {}) {
   const snapshot = row.sourceSnapshot && typeof row.sourceSnapshot === "object" ? row.sourceSnapshot : {};
+  const snapshottedOriginalName = compactText(snapshot.entries?.[0]?.taskName);
   return {
     ...row,
     annualBilling: Array.isArray(snapshot.annualBilling) ? snapshot.annualBilling : [],
@@ -337,7 +344,10 @@ function savedQuoteLine(row = {}) {
       ? snapshot.generatedValues
       : null,
     serviceKey: snapshot.serviceKey || row.serviceKey || "",
-    serviceLabel: snapshot.serviceLabel || row.serviceLabel || ""
+    serviceLabel: snapshot.serviceLabel || row.serviceLabel || "",
+    originalTaskName: compactText(row.originalTaskName) || snapshottedOriginalName || compactText(row.taskName),
+    taskNameOrigin: row.taskNameOrigin || (row.sourceType === "manual" ? "manual" : "teamwork"),
+    taskNamePromptVersion: row.taskNamePromptVersion || ""
   };
 }
 
@@ -527,6 +537,10 @@ function lineEntryGrossAmount(line) {
 }
 
 function quoteLineSettingsKey(line) {
+  const sourceIds = sourceTimeEntryIds(line.sourceTimeEntryIds).sort();
+  if (sourceIds.length) {
+    return `source:${sourceIds.join(",")}::${line.isBillable ? "billable" : "unbillable"}::${line.annualCovered ? "annual" : "standard"}`;
+  }
   return `${compactText(line.taskName || line.description).toLowerCase()}::${line.isBillable ? "billable" : "unbillable"}::${line.annualCovered ? "annual" : "standard"}`;
 }
 
@@ -539,7 +553,13 @@ function applyExistingLineSettings(preview, existingLines = [], services = []) {
         comments: line.comments || "",
         discount: Number(line.discount || 0),
         itemCode: line.itemCode || "",
-        serviceId: line.serviceId || null
+        originalTaskName: line.originalTaskName || line.taskName || "",
+        serviceId: line.serviceId || null,
+        taskName: line.taskName || "",
+        taskNameOrigin: line.taskNameOrigin || (line.sourceType === "manual" ? "manual" : "teamwork"),
+        taskNamePromptVersion: line.taskNamePromptVersion || "",
+        taskNameUpdatedAt: line.taskNameUpdatedAt || null,
+        taskNameUpdatedBy: line.taskNameUpdatedBy || null
       }
     ])
   );
@@ -557,9 +577,15 @@ function applyExistingLineSettings(preview, existingLines = [], services = []) {
       comments: shouldUseSavedComment ? saved.comments : line.comments,
       discount: saved.discount,
       itemCode: saved.itemCode,
+      originalTaskName: saved.originalTaskName,
       serviceId: saved.serviceId,
       serviceKey: service?.serviceKey || "",
-      serviceLabel: service?.label || "Unmapped service"
+      serviceLabel: service?.label || "Unmapped service",
+      taskName: saved.taskName || line.taskName,
+      taskNameOrigin: saved.taskNameOrigin,
+      taskNamePromptVersion: saved.taskNamePromptVersion,
+      taskNameUpdatedAt: saved.taskNameUpdatedAt,
+      taskNameUpdatedBy: saved.taskNameUpdatedBy
     };
   });
 
@@ -601,9 +627,14 @@ async function insertQuoteLines(database, previewId, lines) {
           include_in_xero,
           comments,
           warnings,
-          source_snapshot
+          source_snapshot,
+          original_task_name,
+          task_name_origin,
+          task_name_prompt_version,
+          task_name_updated_by,
+          task_name_updated_at
         )
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
         returning id
       `,
       [
@@ -627,7 +658,12 @@ async function insertQuoteLines(database, previewId, lines) {
         line.includeInXero,
         line.comments,
         JSON.stringify(line.warnings),
-        JSON.stringify(quoteLineSourceSnapshot(line))
+        JSON.stringify(quoteLineSourceSnapshot(line)),
+        compactText(line.originalTaskName) || compactText(line.taskName),
+        line.taskNameOrigin || (line.sourceType === "manual" ? "manual" : "teamwork"),
+        line.taskNamePromptVersion || "",
+        line.taskNameUpdatedBy || null,
+        line.taskNameUpdatedAt || null
       ]
     );
     savedLines.push({ ...line, id: lineResult.rows[0].id });
@@ -806,7 +842,13 @@ function previewResponse({ billingClient, insertRow, lines, preview, quoteDate, 
 }
 
 function xeroDescription(line) {
-  return [compactText(line.description || line.taskName), compactText(line.comments)].filter(Boolean).join("\n");
+  const taskNameWasOverridden = ["ai", "manual"].includes(line.taskNameOrigin)
+    && compactText(line.taskName)
+    && compactText(line.taskName) !== compactText(line.originalTaskName);
+  const primaryDescription = taskNameWasOverridden
+    ? compactText(line.taskName)
+    : compactText(line.description || line.taskName);
+  return [primaryDescription, compactText(line.comments)].filter(Boolean).join("\n");
 }
 
 function xeroUnitAmount({ discountRate, line, lineAmount, quantity }) {
@@ -990,7 +1032,10 @@ export async function previewQuoteForXero(id, input = {}, actor = {}) {
                 unit_amount::float8 as "unitAmount", amount::float8 as amount,
                 is_billable as "isBillable", account_code as "accountCode", item_code as "itemCode", tax_type as "taxType",
                 discount::float8 as discount, annual_covered as "annualCovered",
-                include_in_xero as "includeInXero", comments
+                include_in_xero as "includeInXero", comments,
+                original_task_name as "originalTaskName",
+                task_name_origin as "taskNameOrigin",
+                task_name_prompt_version as "taskNamePromptVersion"
            from quote_lines where quote_preview_id = $1 order by line_order, id`, [id]);
     const contactResult = await database.query("select id, name, raw from xero_contacts where id = $1 limit 1", [billingClient.xeroContactId]);
     const accountsResult = await database.query("select code, name from xero_accounts where coalesce(nullif(status, ''), 'ACTIVE') = 'ACTIVE'");
@@ -1165,7 +1210,12 @@ async function loadDraftPreview(database, id, { persistLegacySnapshots = false }
         line.include_in_xero as "includeInXero",
         line.comments,
         line.warnings,
-        line.source_snapshot as "sourceSnapshot"
+        line.source_snapshot as "sourceSnapshot",
+        line.original_task_name as "originalTaskName",
+        line.task_name_origin as "taskNameOrigin",
+        line.task_name_prompt_version as "taskNamePromptVersion",
+        line.task_name_updated_by as "taskNameUpdatedBy",
+        line.task_name_updated_at as "taskNameUpdatedAt"
       from quote_lines line
       left join standard_services service on service.id = line.service_id
       where line.quote_preview_id = $1
@@ -2093,6 +2143,81 @@ export async function createQuotePreview({ billingClientId, documentType, editor
   }
 }
 
+export async function loadQuoteTaskNameSuggestionContext(id, input = {}, actor = {}) {
+  const pool = getDatabasePool();
+  if (!pool) throw draftError("DATABASE_URL is not configured.", 503, "DATABASE_UNAVAILABLE");
+
+  const previewResult = await pool.query(
+    `
+      select
+        preview.id,
+        preview.status,
+        preview.send_state as "sendState",
+        preview.version::int as version,
+        preview.archived_at as "archivedAt",
+        preview.editing_by as "editingBy",
+        preview.editing_session_id::text as "editingSessionId",
+        preview.editing_expires_at as "editingExpiresAt",
+        editor.display_name as "editingByName"
+      from quote_previews preview
+      left join app_users editor on editor.id = preview.editing_by
+      where preview.id = $1
+    `,
+    [id]
+  );
+  if (!previewResult.rowCount) throw draftError("Draft not found.", 404, "DRAFT_NOT_FOUND");
+  const preview = previewResult.rows[0];
+  if (preview.status !== "preview") throw draftError("This document has already been sent.", 409, "DRAFT_NOT_EDITABLE");
+  assertDraftMutation(preview, input, actor);
+
+  const lineIds = [...new Set((Array.isArray(input.lineIds) ? input.lineIds : [])
+    .map((lineId) => compactText(lineId))
+    .filter(Boolean))];
+  if (!lineIds.length) throw draftError("Choose at least one task to improve.", 400, "AI_TASK_NAMES_EMPTY");
+  if (lineIds.length > 20) throw draftError("Improve up to 20 tasks at a time.", 400, "AI_TASK_NAMES_LIMIT");
+
+  const linesResult = await pool.query(
+    `
+      select
+        id,
+        source_type as "sourceType",
+        task_name as "taskName",
+        original_task_name as "originalTaskName",
+        source_snapshot as "sourceSnapshot"
+      from quote_lines
+      where quote_preview_id = $1
+        and id = any($2::uuid[])
+      order by line_order, id
+    `,
+    [id, lineIds]
+  );
+  if (linesResult.rowCount !== lineIds.length) {
+    throw draftError("One or more document tasks could not be found.", 404, "DRAFT_LINE_NOT_FOUND");
+  }
+  if (linesResult.rows.some((line) => line.sourceType === "manual")) {
+    throw draftError("AI rewriting is available only for Teamwork tasks.", 400, "AI_TASK_NAMES_SOURCE_INVALID");
+  }
+
+  return {
+    id,
+    version: preview.version,
+    lines: linesResult.rows.map((line) => {
+      const entries = Array.isArray(line.sourceSnapshot?.entries) ? line.sourceSnapshot.entries : [];
+      return {
+        lineId: line.id,
+        taskName: compactText(line.taskName),
+        originalTaskName: compactText(line.originalTaskName) || compactText(entries[0]?.taskName) || compactText(line.taskName),
+        entryCount: entries.length,
+        descriptions: entries.map((entry) => {
+          const assignedUser = compactText(entry.userName);
+          const description = compactText(entry.description);
+          return assignedUser ? compactText(description.replaceAll(assignedUser, "")) : description;
+        }).filter(Boolean)
+      };
+    })
+  };
+}
+
 export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
   const pool = getDatabasePool();
   if (!pool) {
@@ -2352,6 +2477,7 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
         `
           select
             id,
+            source_type as "sourceType",
             service_id as "serviceId",
             source_time_entry_ids as "sourceTimeEntryIds",
             annual_year as "annualYear",
@@ -2368,7 +2494,12 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
             is_billable as "isBillable",
             annual_covered as "annualCovered",
             comments,
-            source_snapshot as "sourceSnapshot"
+            source_snapshot as "sourceSnapshot",
+            original_task_name as "originalTaskName",
+            task_name_origin as "taskNameOrigin",
+            task_name_prompt_version as "taskNamePromptVersion",
+            task_name_updated_by as "taskNameUpdatedBy",
+            task_name_updated_at as "taskNameUpdatedAt"
           from quote_lines
           where id = $1
             and quote_preview_id = $2
@@ -2435,6 +2566,18 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
           ? roundMoney(toEditableNumber(line.unitAmount, "Rate"))
           : Number(currentLine.unitAmount || 0)
       };
+      const taskNameChanged = Object.hasOwn(line, "taskName") && nextLine.taskName !== currentLine.taskName;
+      const originalTaskName = compactText(currentLine.originalTaskName)
+        || compactText(sourceSnapshot.entries?.[0]?.taskName)
+        || compactText(currentLine.taskName);
+      const taskNameOrigin = taskNameChanged
+        ? (line.taskNameOrigin === "ai" ? "ai" : "manual")
+        : (currentLine.taskNameOrigin || (currentLine.sourceType === "manual" ? "manual" : "teamwork"));
+      const taskNamePromptVersion = taskNameChanged && taskNameOrigin === "ai"
+        ? truncateText(line.taskNamePromptVersion, 80)
+        : (taskNameChanged ? "" : currentLine.taskNamePromptVersion || "");
+      const taskNameUpdatedBy = taskNameChanged ? access.userId : currentLine.taskNameUpdatedBy;
+      const taskNameUpdatedAt = taskNameChanged ? new Date() : currentLine.taskNameUpdatedAt;
       const amount = editedLineAmount(nextLine);
       const includeInXero =
         Boolean(nextLine.isBillable) &&
@@ -2460,6 +2603,11 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
             service_id = $14,
             annual_year = $15,
             source_snapshot = $16,
+            original_task_name = $17,
+            task_name_origin = $18,
+            task_name_prompt_version = $19,
+            task_name_updated_by = $20,
+            task_name_updated_at = $21,
             updated_at = now()
           where id = $1
             and quote_preview_id = $2
@@ -2480,7 +2628,12 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
           includeInXero,
           nextLine.serviceId,
           nextLine.annualYear,
-          JSON.stringify(sourceSnapshot)
+          JSON.stringify(sourceSnapshot),
+          originalTaskName,
+          taskNameOrigin,
+          taskNamePromptVersion,
+          taskNameUpdatedBy,
+          taskNameUpdatedAt
         ]
       );
     }
@@ -2533,7 +2686,12 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
             discount::float8 as discount,
             warnings,
             comments,
-            source_snapshot as "sourceSnapshot"
+            source_snapshot as "sourceSnapshot",
+            original_task_name as "originalTaskName",
+            task_name_origin as "taskNameOrigin",
+            task_name_prompt_version as "taskNamePromptVersion",
+            task_name_updated_by as "taskNameUpdatedBy",
+            task_name_updated_at as "taskNameUpdatedAt"
           from quote_lines
           where quote_preview_id = $1
           order by line_order, id
@@ -2592,6 +2750,11 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
           sourceTimeEntryIds: sourceTimeEntryIds(line.sourceTimeEntryIds),
           sourceType: "manual",
           taskName: line.taskName || line.description || "Manual row",
+          originalTaskName: line.originalTaskName || line.taskName || line.description || "Manual row",
+          taskNameOrigin: line.taskNameOrigin || "manual",
+          taskNamePromptVersion: line.taskNamePromptVersion || "",
+          taskNameUpdatedAt: line.taskNameUpdatedAt || null,
+          taskNameUpdatedBy: line.taskNameUpdatedBy || null,
           taxType: line.taxType || billingClient.taxType,
           unitAmount: Number(line.unitAmount || 0),
           warnings: line.warnings || []
@@ -2729,7 +2892,12 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
           line.include_in_xero as "includeInXero",
           line.comments,
           line.warnings,
-          line.source_snapshot as "sourceSnapshot"
+          line.source_snapshot as "sourceSnapshot",
+          line.original_task_name as "originalTaskName",
+          line.task_name_origin as "taskNameOrigin",
+          line.task_name_prompt_version as "taskNamePromptVersion",
+          line.task_name_updated_by as "taskNameUpdatedBy",
+          line.task_name_updated_at as "taskNameUpdatedAt"
         from quote_lines line
         left join standard_services service on service.id = line.service_id
         where line.quote_preview_id = $1
@@ -2857,7 +3025,12 @@ export async function updateQuotePreviewTimeEntryBillable(id, input = {}, actor 
           is_billable as "isBillable",
           discount::float8 as discount,
           comments,
-          source_snapshot as "sourceSnapshot"
+          source_snapshot as "sourceSnapshot",
+          original_task_name as "originalTaskName",
+          task_name_origin as "taskNameOrigin",
+          task_name_prompt_version as "taskNamePromptVersion",
+          task_name_updated_by as "taskNameUpdatedBy",
+          task_name_updated_at as "taskNameUpdatedAt"
         from quote_lines
         where quote_preview_id = $1
       `,
@@ -3174,7 +3347,10 @@ export async function sendQuotePreviewToXero(id, input = {}, actor = {}, interna
           annual_covered as "annualCovered",
           include_in_xero as "includeInXero",
           comments,
-          warnings
+          warnings,
+          original_task_name as "originalTaskName",
+          task_name_origin as "taskNameOrigin",
+          task_name_prompt_version as "taskNamePromptVersion"
         from quote_lines
         where quote_preview_id = $1
         order by line_order, id

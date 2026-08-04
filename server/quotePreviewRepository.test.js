@@ -19,6 +19,25 @@ test("allows task-level edits while protecting source time entries", () => {
     () => quoteDraftTestHooks.assertEditableQuoteLinePatch({ id: "line-1", taskName: "  " }),
     (error) => error.code === "TASK_NAME_REQUIRED" && error.statusCode === 400
   );
+  assert.doesNotThrow(() => quoteDraftTestHooks.assertEditableQuoteLinePatch({
+    id: "line-1",
+    taskName: "Professional review of corporate records.",
+    taskNameOrigin: "ai",
+    taskNamePromptVersion: "task-name-v1"
+  }));
+  assert.doesNotThrow(() => quoteDraftTestHooks.assertEditableQuoteLinePatch({
+    id: "line-1",
+    taskName: "Manually entered invoice wording.",
+    taskNameOrigin: "manual"
+  }));
+  assert.throws(
+    () => quoteDraftTestHooks.assertEditableQuoteLinePatch({ id: "line-1", taskName: "Changed", taskNameOrigin: "teamwork" }),
+    (error) => error.code === "TASK_NAME_ORIGIN_INVALID" && error.statusCode === 400
+  );
+  assert.throws(
+    () => quoteDraftTestHooks.assertEditableQuoteLinePatch({ id: "line-1", taskName: "Changed", taskNamePromptVersion: "task-name-v1" }),
+    (error) => error.code === "TASK_NAME_PROMPT_INVALID" && error.statusCode === 400
+  );
 });
 
 test("applies Maria's role to new drafts and preserves snapshot rates afterward", () => {
@@ -270,4 +289,40 @@ test("builds the Xero draft invoice payload by default", () => {
   assert.equal(invoice.LineItems[0].LineAmount, 900);
   assert.equal(invoice.LineItems[0].UnitAmount, 333.3333);
   assert.equal(payload.source.documentType, "draft_invoice");
+});
+
+test("AI-assisted task names become the authoritative Xero line wording", () => {
+  const payload = buildXeroDocumentPayload({
+    billingClient: {
+      accountCode: "70330001",
+      currency: "EUR",
+      displayName: "Client A",
+      taxType: "OUTPUT2",
+      xeroContactId: "contact-a"
+    },
+    lines: [{
+      accountCode: "70330001",
+      amount: 300,
+      description: "Legacy generated description",
+      discount: 0,
+      id: "line-1",
+      includeInXero: true,
+      isBillable: true,
+      originalTaskName: "Internal Teamwork task",
+      quantityHours: 1,
+      taskName: "Client-facing professional services.",
+      taskNameOrigin: "ai",
+      taxType: "OUTPUT2",
+      unitAmount: 300
+    }],
+    previewRow: {
+      expiryDate: "2026-08-15",
+      id: "preview-1",
+      quoteDate: "2026-08-01",
+      quoteNumber: "CLI-2026-01",
+      reference: "July 2026"
+    }
+  });
+
+  assert.equal(payload.body.Invoices[0].LineItems[0].Description, "Client-facing professional services.");
 });

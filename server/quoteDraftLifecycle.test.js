@@ -94,6 +94,20 @@ test("source snapshots preserve the generated entry and annual breakdown", () =>
   assert.equal(saved.serviceLabel, source.serviceLabel);
 });
 
+test("saved draft lines retain their original Teamwork name and AI provenance", () => {
+  const saved = quoteDraftTestHooks.savedQuoteLine({
+    sourceType: "teamwork",
+    sourceSnapshot: { entries: [{ taskName: "Original Teamwork task" }] },
+    taskName: "Client-facing invoice wording",
+    taskNameOrigin: "ai",
+    taskNamePromptVersion: "task-name-v1"
+  });
+
+  assert.equal(saved.originalTaskName, "Original Teamwork task");
+  assert.equal(saved.taskNameOrigin, "ai");
+  assert.equal(saved.taskNamePromptVersion, "task-name-v1");
+});
+
 test("draft-line removal cannot be combined with source-entry mutation", () => {
   assert.doesNotThrow(() => quoteDraftTestHooks.assertEditableQuoteLinePatch({ id: "line-1", remove: true }));
   assert.throws(
