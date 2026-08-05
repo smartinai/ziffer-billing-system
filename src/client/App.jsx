@@ -1131,7 +1131,10 @@ function manualQuoteLineDraft(preview = {}) {
 
 function quoteAnnualYearOptions(preview = {}, line = {}, availableYears = []) {
   const years = new Set(availableYears.map(Number).filter((year) => Number.isInteger(year) && year >= 2000 && year <= 2100));
-  years.add(new Date().getFullYear() - 1);
+  const currentYear = new Date().getFullYear();
+  years.add(currentYear - 1);
+  years.add(currentYear);
+  years.add(currentYear + 1);
   for (const value of [preview?.period?.startDate, preview?.period?.endDate, preview?.quoteDate, line?.annualYear]) {
     const year = Number(String(value || "").slice(0, 4));
     if (Number.isInteger(year) && year >= 2000 && year <= 2100) years.add(year);
