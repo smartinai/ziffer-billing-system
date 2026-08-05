@@ -2536,6 +2536,22 @@ td strong {
   color: #765612;
 }
 
+.draft-version-conflict {
+  align-items: center;
+  background: #fff1ee;
+  border: 1px solid #e5a79d;
+  border-radius: 8px;
+  color: #8f352a;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  padding: 12px 14px;
+}
+
+.draft-version-conflict button {
+  flex: 0 0 auto;
+}
+
 .success-banner {
   background: #e9f7f1;
   border: 1px solid #a8d8c3;
@@ -2571,22 +2587,37 @@ td strong {
   margin-top: 4px;
 }
 
-.draft-ledger-table {
-  min-width: 900px;
+.quotes-table.draft-ledger-table {
+  min-width: 1040px;
+  table-layout: fixed;
 }
 
-.draft-ledger-table th:nth-child(1),
-.draft-ledger-table td:nth-child(1) { width: 22%; text-align: left; }
-.draft-ledger-table th:nth-child(2),
-.draft-ledger-table td:nth-child(2) { width: 22%; text-align: left; }
-.draft-ledger-table th:nth-child(3),
-.draft-ledger-table td:nth-child(3) { width: 18%; text-align: left; }
-.draft-ledger-table th:nth-child(4),
-.draft-ledger-table td:nth-child(4) { width: 12%; text-align: right; }
-.draft-ledger-table th:nth-child(5),
-.draft-ledger-table td:nth-child(5) { width: 14%; text-align: left; }
-.draft-ledger-table th:nth-child(6),
-.draft-ledger-table td:nth-child(6) { width: 12%; text-align: right; }
+.quotes-table.draft-ledger-table th:nth-child(1),
+.quotes-table.draft-ledger-table td:nth-child(1) { width: 18%; text-align: left; }
+.quotes-table.draft-ledger-table th:nth-child(2),
+.quotes-table.draft-ledger-table td:nth-child(2) { width: 13%; text-align: left; }
+.quotes-table.draft-ledger-table th:nth-child(3),
+.quotes-table.draft-ledger-table td:nth-child(3) { width: 19%; text-align: left; }
+.quotes-table.draft-ledger-table th:nth-child(4),
+.quotes-table.draft-ledger-table td:nth-child(4) { width: 14%; text-align: left; }
+.quotes-table.draft-ledger-table th:nth-child(5),
+.quotes-table.draft-ledger-table td:nth-child(5) { width: 10%; text-align: right; }
+.quotes-table.draft-ledger-table th:nth-child(6),
+.quotes-table.draft-ledger-table td:nth-child(6) { width: 16%; text-align: left; }
+.quotes-table.draft-ledger-table th:nth-child(7),
+.quotes-table.draft-ledger-table td:nth-child(7) { width: 10%; text-align: right; }
+
+.draft-created-at time,
+.draft-last-editor time {
+  color: #77736d;
+  font-size: 12px;
+}
+
+.draft-last-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
 
 .draft-lock-pill {
   gap: 5px;
@@ -4556,6 +4587,14 @@ td strong {
   padding: 16px 24px;
   border-top: 1px solid #e6e1da;
   background: rgba(255, 255, 255, 0.96);
+}
+
+.quote-line-edit-error {
+  min-width: 0;
+  margin: 0 auto 0 0;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.35;
 }
 
 .reporting-chart-panel {

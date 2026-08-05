@@ -322,13 +322,21 @@ function quoteLineSourceSnapshot(line = {}) {
     annualBilling: Array.isArray(line.annualBilling) ? line.annualBilling : [],
     annualCoverage: Array.isArray(line.annualCoverage) ? line.annualCoverage : [],
     entries: Array.isArray(line.entries) ? line.entries : [],
-    generatedValues: {
-      discount: Number(line.discount || 0),
-      quantityHours: Number(line.quantityHours || 0),
-      unitAmount: Number(line.unitAmount || 0)
-    },
+    generatedValues: line.generatedValues && typeof line.generatedValues === "object"
+      ? {
+          discount: Number(line.generatedValues.discount || 0),
+          quantityHours: Number(line.generatedValues.quantityHours || 0),
+          unitAmount: Number(line.generatedValues.unitAmount || 0)
+        }
+      : {
+          discount: Number(line.discount || 0),
+          quantityHours: Number(line.quantityHours || 0),
+          unitAmount: Number(line.unitAmount || 0)
+        },
     serviceKey: line.serviceKey || "",
-    serviceLabel: line.serviceLabel || ""
+    serviceLabel: line.serviceLabel || "",
+    rateSource: line.rateSource || (line.sourceType === "manual" ? "line" : "entries"),
+    taskId: compactText(line.taskId) || compactText(line.entries?.[0]?.taskId)
   };
 }
 
@@ -345,6 +353,8 @@ function savedQuoteLine(row = {}) {
       : null,
     serviceKey: snapshot.serviceKey || row.serviceKey || "",
     serviceLabel: snapshot.serviceLabel || row.serviceLabel || "",
+    rateSource: snapshot.rateSource || row.rateSource || "",
+    taskId: compactText(snapshot.taskId) || compactText(row.taskId) || compactText(snapshot.entries?.[0]?.taskId),
     originalTaskName: compactText(row.originalTaskName) || snapshottedOriginalName || compactText(row.taskName),
     taskNameOrigin: row.taskNameOrigin || (row.sourceType === "manual" ? "manual" : "teamwork"),
     taskNamePromptVersion: row.taskNamePromptVersion || ""
@@ -353,15 +363,20 @@ function savedQuoteLine(row = {}) {
 
 export const quoteDraftTestHooks = {
   activeLock,
+  applyExistingLineSettings,
   applyMariaRoleRates,
   applySnapshottedEntryRates,
+  assertAnnualServiceYear,
   assertEditableQuoteLinePatch,
   assertDraftMutation,
   draftLockKey,
   ambiguousXeroError,
   quoteLineSourceSnapshot,
+  recalculateDraftTotals,
   requestedTimeEntryIds,
   savedQuoteLine,
+  storedDraftSourceEntries,
+  storedManualDraftLines,
   validatedItemCode,
   xeroIdempotencyKey,
   xeroTransportFromLookup
@@ -417,6 +432,29 @@ async function loadQuoteBillableOverrides(database, previewId) {
   }
 
   return billableOverrides;
+}
+
+async function loadQuoteRateOverrides(database, previewId) {
+  const result = await database.query(
+    `
+      select metadata
+      from quote_events
+      where quote_preview_id = $1
+        and action = 'time_entry_rate_override'
+      order by created_at, id
+    `,
+    [previewId]
+  );
+
+  const rateOverrides = new Map();
+  for (const event of result.rows) {
+    const sourceTimeEntryId = compactText(event.metadata?.sourceTimeEntryId);
+    const userRate = Number(event.metadata?.userRate);
+    if (!sourceTimeEntryId || !Number.isFinite(userRate) || userRate < 0) continue;
+    rateOverrides.set(sourceTimeEntryId, userRate);
+  }
+
+  return rateOverrides;
 }
 
 async function loadPreviewSourceEntries(database, billingClient, periodStart, periodEnd) {
@@ -491,6 +529,13 @@ function toAnnualYear(value) {
   return year;
 }
 
+function assertAnnualServiceYear(service, annualYear) {
+  if (service?.annualInvoiceEligible && !Number.isInteger(annualYear)) {
+    throw draftError("Select an annual invoice year.", 400, "ANNUAL_YEAR_REQUIRED");
+  }
+  return annualYear;
+}
+
 async function validatedItemCode(database, value) {
   const itemCode = compactText(value);
   if (!itemCode) return "";
@@ -527,15 +572,6 @@ function editedLineAmount(line) {
   return roundMoney(Number(line.quantityHours || 0) * Number(line.unitAmount || 0) * (1 - Number(line.discount || 0) / 100));
 }
 
-function lineEntryGrossAmount(line) {
-  if (line.includeInXero === false || line.annualCovered) return 0;
-
-  return (line.entries || []).reduce((sum, entry) => {
-    if (!entry.isBillable || entry.annualCovered || Number(entry.userRate || 0) <= 0) return sum;
-    return sum + Number(entry.hours || 0) * Number(entry.userRate || 0);
-  }, 0);
-}
-
 function quoteLineSettingsKey(line) {
   const sourceIds = sourceTimeEntryIds(line.sourceTimeEntryIds).sort();
   if (sourceIds.length) {
@@ -544,60 +580,120 @@ function quoteLineSettingsKey(line) {
   return `${compactText(line.taskName || line.description).toLowerCase()}::${line.isBillable ? "billable" : "unbillable"}::${line.annualCovered ? "annual" : "standard"}`;
 }
 
-function applyExistingLineSettings(preview, existingLines = [], services = []) {
-  const servicesById = new Map(services.map((service) => [service.id, service]));
-  const settingsByKey = new Map(
-    existingLines.map((line) => [
-      quoteLineSettingsKey(line),
-      {
-        comments: line.comments || "",
-        discount: Number(line.discount || 0),
-        itemCode: line.itemCode || "",
-        originalTaskName: line.originalTaskName || line.taskName || "",
-        serviceId: line.serviceId || null,
-        taskName: line.taskName || "",
-        taskNameOrigin: line.taskNameOrigin || (line.sourceType === "manual" ? "manual" : "teamwork"),
-        taskNamePromptVersion: line.taskNamePromptVersion || "",
-        taskNameUpdatedAt: line.taskNameUpdatedAt || null,
-        taskNameUpdatedBy: line.taskNameUpdatedBy || null
-      }
-    ])
-  );
+function quoteLineSourceIds(line = {}) {
+  return [...new Set([
+    ...sourceTimeEntryIds(line.sourceTimeEntryIds),
+    ...(Array.isArray(line.entries) ? line.entries.map((entry) => compactText(entry?.id)).filter(Boolean) : [])
+  ])].sort();
+}
+
+function quoteLineSourceKey(line = {}) {
+  const sourceIds = quoteLineSourceIds(line);
+  return sourceIds.length ? `source:${sourceIds.join(",")}` : quoteLineSettingsKey(line);
+}
+
+function sharedSourceEntryCount(left = {}, right = {}) {
+  const rightIds = new Set(quoteLineSourceIds(right));
+  return quoteLineSourceIds(left).reduce((count, entryId) => count + Number(rightIds.has(entryId)), 0);
+}
+
+function recalculateDraftTotals(preview, lines) {
+  const totals = { ...(preview.totals || {}) };
+  totals.amount = roundMoney(lines.reduce((sum, line) => sum + Number(line.amount || 0), 0));
+  totals.annualCoveredHours = roundHours(lines.reduce(
+    (sum, line) => sum + (line.annualCovered ? Number(line.quantityHours || 0) : 0),
+    0
+  ));
+  totals.billedHours = roundHours(lines.reduce(
+    (sum, line) => sum + (line.isBillable ? Number(line.quantityHours || 0) : 0),
+    0
+  ));
+  totals.includedHours = roundHours(lines.reduce(
+    (sum, line) => sum + (line.isBillable && line.includeInXero !== false && !line.annualCovered ? Number(line.quantityHours || 0) : 0),
+    0
+  ));
+  totals.lineCount = lines.length;
+  totals.notBilledHours = roundHours(lines.reduce(
+    (sum, line) => sum + (!line.isBillable ? Number(line.quantityHours || 0) : 0),
+    0
+  ));
+  totals.totalHours = roundHours(lines.reduce((sum, line) => sum + Number(line.quantityHours || 0), 0));
+  totals.zeroRateHours = roundHours(lines.reduce(
+    (sum, line) => sum + (line.isBillable && !line.annualCovered && Number(line.unitAmount || 0) <= 0 ? Number(line.quantityHours || 0) : 0),
+    0
+  ));
+  return { ...preview, lines, totals };
+}
+
+function applyExistingLineSettings(preview, existingLines = [], _services = [], options = {}) {
+  const rateChangedEntryIds = options.rateChangedEntryIds instanceof Set
+    ? options.rateChangedEntryIds
+    : new Set(options.rateChangedEntryIds || []);
+  const storedLines = existingLines.filter((line) => line.sourceType !== "manual").map(savedQuoteLine);
+  const linesByExactKey = new Map();
+  const rebuiltExactCounts = new Map();
+  const storedSourceCounts = new Map();
+  const rebuiltSourceCounts = new Map();
+
+  for (const line of storedLines) {
+    const exactKey = quoteLineSettingsKey(line);
+    const bucket = linesByExactKey.get(exactKey) || [];
+    bucket.push(line);
+    linesByExactKey.set(exactKey, bucket);
+    const sourceKey = quoteLineSourceKey(line);
+    storedSourceCounts.set(sourceKey, (storedSourceCounts.get(sourceKey) || 0) + 1);
+  }
+  for (const line of preview.lines) {
+    const exactKey = quoteLineSettingsKey(line);
+    rebuiltExactCounts.set(exactKey, (rebuiltExactCounts.get(exactKey) || 0) + 1);
+    const sourceKey = quoteLineSourceKey(line);
+    rebuiltSourceCounts.set(sourceKey, (rebuiltSourceCounts.get(sourceKey) || 0) + 1);
+  }
 
   const lines = preview.lines.map((line) => {
-    const saved = settingsByKey.get(quoteLineSettingsKey(line));
+    const exactKey = quoteLineSettingsKey(line);
+    const exactMatches = linesByExactKey.get(exactKey) || [];
+    const saved = exactMatches.length === 1
+      ? exactMatches[0]
+      : storedLines
+          .map((candidate) => ({ candidate, overlap: sharedSourceEntryCount(candidate, line) }))
+          .filter((match) => match.overlap > 0)
+          .sort((left, right) => right.overlap - left.overlap)[0]?.candidate;
     if (!saved) return line;
 
-    const amount = roundMoney(lineEntryGrossAmount(line) * (1 - saved.discount / 100));
-    const shouldUseSavedComment = saved.comments && !line.annualCovered && line.isBillable;
-    const service = saved.serviceId ? servicesById.get(saved.serviceId) : null;
-    return {
+    const sourceKey = quoteLineSourceKey(line);
+    const preserveQuantity = exactMatches.length === 1 && rebuiltExactCounts.get(exactKey) === 1
+      || storedSourceCounts.get(sourceKey) === 1 && rebuiltSourceCounts.get(sourceKey) === 1;
+    const rateChanged = quoteLineSourceIds(line).some((entryId) => rateChangedEntryIds.has(entryId));
+    const rateFromEntries = rateChanged || saved.rateSource === "entries";
+    const restored = {
       ...line,
-      amount,
-      comments: shouldUseSavedComment ? saved.comments : line.comments,
-      discount: saved.discount,
+      accountCode: saved.accountCode ?? line.accountCode,
+      comments: saved.comments ?? line.comments,
+      description: saved.description ?? line.description,
+      discount: Number(saved.discount || 0),
+      generatedValues: saved.generatedValues || line.generatedValues || null,
       itemCode: saved.itemCode,
       originalTaskName: saved.originalTaskName,
-      serviceId: saved.serviceId,
-      serviceKey: service?.serviceKey || "",
-      serviceLabel: service?.label || "Unmapped service",
+      quantityHours: preserveQuantity ? Number(saved.quantityHours || 0) : Number(line.quantityHours || 0),
+      rateSource: rateFromEntries ? "entries" : (saved.rateSource || "line"),
       taskName: saved.taskName || line.taskName,
       taskNameOrigin: saved.taskNameOrigin,
       taskNamePromptVersion: saved.taskNamePromptVersion,
       taskNameUpdatedAt: saved.taskNameUpdatedAt,
-      taskNameUpdatedBy: saved.taskNameUpdatedBy
+      taskNameUpdatedBy: saved.taskNameUpdatedBy,
+      taxType: saved.taxType ?? line.taxType,
+      unitAmount: rateFromEntries ? Number(line.unitAmount || 0) : Number(saved.unitAmount || 0)
     };
+    restored.includeInXero = Boolean(restored.isBillable)
+      && !restored.annualCovered
+      && restored.quantityHours > 0
+      && restored.unitAmount > 0;
+    restored.amount = editedLineAmount(restored);
+    return restored;
   });
 
-  return {
-    ...preview,
-    lines,
-    totals: {
-      ...preview.totals,
-      amount: roundMoney(lines.reduce((sum, line) => sum + Number(line.amount || 0), 0)),
-      lineCount: lines.length
-    }
-  };
+  return recalculateDraftTotals(preview, lines);
 }
 
 async function insertQuoteLines(database, previewId, lines) {
@@ -670,6 +766,191 @@ async function insertQuoteLines(database, previewId, lines) {
   }
 
   return savedLines;
+}
+
+async function loadStoredDraftLines(database, previewId) {
+  const result = await database.query(
+    `
+      select
+        line.id,
+        line.line_order as "lineOrder",
+        line.service_id as "serviceId",
+        service.service_key as "serviceKey",
+        service.label as "serviceLabel",
+        line.source_type as "sourceType",
+        line.source_time_entry_ids as "sourceTimeEntryIds",
+        line.annual_year as "annualYear",
+        line.task_name as "taskName",
+        line.description,
+        line.quantity_hours::float8 as "quantityHours",
+        line.unit_amount::float8 as "unitAmount",
+        line.discount::float8 as discount,
+        line.amount::float8 as amount,
+        line.account_code as "accountCode",
+        line.item_code as "itemCode",
+        line.tax_type as "taxType",
+        line.is_billable as "isBillable",
+        line.annual_covered as "annualCovered",
+        line.include_in_xero as "includeInXero",
+        line.comments,
+        line.warnings,
+        line.source_snapshot as "sourceSnapshot",
+        line.original_task_name as "originalTaskName",
+        line.task_name_origin as "taskNameOrigin",
+        line.task_name_prompt_version as "taskNamePromptVersion",
+        line.task_name_updated_by as "taskNameUpdatedBy",
+        line.task_name_updated_at as "taskNameUpdatedAt"
+      from quote_lines line
+      left join standard_services service on service.id = line.service_id
+      where line.quote_preview_id = $1
+      order by line.line_order, line.id
+    `,
+    [previewId]
+  );
+  return result.rows.map(savedQuoteLine);
+}
+
+function storedDraftSourceEntries(lines = []) {
+  const sourceLines = lines.filter((line) => line.sourceType !== "manual" && Array.isArray(line.entries) && line.entries.length);
+  const parents = sourceLines.map((_, index) => index);
+  const firstLineByEntryId = new Map();
+  const firstLineByTaskKey = new Map();
+
+  function root(index) {
+    while (parents[index] !== index) {
+      parents[index] = parents[parents[index]];
+      index = parents[index];
+    }
+    return index;
+  }
+
+  function join(left, right) {
+    const leftRoot = root(left);
+    const rightRoot = root(right);
+    if (leftRoot !== rightRoot) parents[rightRoot] = leftRoot;
+  }
+
+  sourceLines.forEach((line, lineIndex) => {
+    const originalTaskName = compactText(line.originalTaskName) || compactText(line.taskName) || compactText(line.description);
+    const taskKey = compactText(line.taskId) || `name:${originalTaskName.toLowerCase()}`;
+    if (firstLineByTaskKey.has(taskKey)) join(lineIndex, firstLineByTaskKey.get(taskKey));
+    else firstLineByTaskKey.set(taskKey, lineIndex);
+    for (const entryId of quoteLineSourceIds(line)) {
+      if (firstLineByEntryId.has(entryId)) join(lineIndex, firstLineByEntryId.get(entryId));
+      else firstLineByEntryId.set(entryId, lineIndex);
+    }
+  });
+
+  const entriesById = new Map();
+  sourceLines.forEach((line, lineIndex) => {
+    const originalTaskName = compactText(line.originalTaskName) || compactText(line.taskName) || compactText(line.description);
+    for (const entry of line.entries) {
+      const entryId = compactText(entry?.id);
+      if (!entryId) continue;
+      const existing = entriesById.get(entryId);
+      const entryHours = Number(entry.hours || 0);
+      if (existing) {
+        existing.hours = roundHours(existing.hours + entryHours);
+        continue;
+      }
+      entriesById.set(entryId, {
+        ...entry,
+        date: entry.date || entry.loggedOn || "",
+        hours: roundHours(entryHours),
+        id: entryId,
+        isBillable: entry.isBillable !== false,
+        loggedOn: entry.loggedOn || entry.date || "",
+        taskId: compactText(entry.taskId) || compactText(line.taskId) || `draft-task:${root(lineIndex)}`,
+        taskName: compactText(entry.taskName) || originalTaskName,
+        teamworkInvoiceId: compactText(entry.teamworkInvoiceId),
+        originalUserRate: Number(entry.originalUserRate ?? entry.userRate ?? 0),
+        userRate: Number(entry.userRate || 0)
+      });
+    }
+  });
+
+  return [...entriesById.values()];
+}
+
+function storedManualDraftLines(lines = []) {
+  return lines
+    .filter((line) => line.sourceType === "manual")
+    .map((line) => ({
+      ...line,
+      amount: editedLineAmount(line),
+      lineOrder: Number(line.lineOrder || 0),
+      sourceTimeEntryIds: quoteLineSourceIds(line),
+      sourceType: "manual",
+      warnings: Array.isArray(line.warnings) ? line.warnings : []
+    }));
+}
+
+async function rebuildStoredDraftPreview({
+  billingClient,
+  billableChanges = new Map(),
+  database,
+  existingLines = null,
+  periodEnd,
+  periodStart,
+  previewId,
+  rateChanges = new Map(),
+  services
+}) {
+  const storedLines = existingLines || await loadStoredDraftLines(database, previewId);
+  const entries = storedDraftSourceEntries(storedLines);
+  const availableEntryIds = new Set(entries.map((entry) => String(entry.id)));
+  for (const entryId of billableChanges.keys()) {
+    if (!availableEntryIds.has(String(entryId))) {
+      throw draftError("One or more source time entries are not part of this document preview.", 404, "DRAFT_SOURCE_ENTRY_NOT_FOUND");
+    }
+  }
+  for (const entryId of rateChanges.keys()) {
+    if (!availableEntryIds.has(String(entryId))) {
+      throw draftError("One or more source time entries are not part of this document preview.", 404, "DRAFT_SOURCE_ENTRY_NOT_FOUND");
+    }
+  }
+
+  const billableOverrides = await loadQuoteBillableOverrides(database, previewId);
+  for (const [entryId, isBillable] of billableChanges) billableOverrides.set(String(entryId), isBillable);
+  let adjustedEntries = entries.map((entry) => billableOverrides.has(String(entry.id))
+    ? { ...entry, isBillable: billableOverrides.get(String(entry.id)) }
+    : entry);
+  const rateOverrides = await loadQuoteRateOverrides(database, previewId);
+  for (const [entryId, userRate] of rateChanges) rateOverrides.set(String(entryId), userRate);
+  adjustedEntries = adjustedEntries.map((entry) => rateOverrides.has(String(entry.id))
+    ? {
+        ...entry,
+        originalUserRate: Number(entry.originalUserRate ?? entry.userRate ?? 0),
+        userRate: rateOverrides.get(String(entry.id))
+      }
+    : entry);
+  const serviceOverrides = await loadQuoteServiceOverrides(database, previewId);
+  const annualUsage = await loadAnnualUsage(
+    database,
+    billingClient.id,
+    periodStart,
+    periodEnd,
+    adjustedEntries,
+    serviceOverrides.map((override) => override.annualYear).filter(Boolean)
+  );
+  let preview = applyExistingLineSettings(
+    buildAggregatedQuotePreview({
+      annualUsage,
+      billingClient,
+      entries: adjustedEntries,
+      periodEnd,
+      periodStart,
+      serviceOverrides,
+      services
+    }),
+    storedLines,
+    services,
+    { rateChangedEntryIds: new Set(rateChanges.keys()) }
+  );
+  const manualLines = storedManualDraftLines(storedLines);
+  const lines = [...manualLines, ...preview.lines].map((line, index) => ({ ...line, lineOrder: index + 1 }));
+  preview = recalculateDraftTotals(preview, lines);
+  return { availableEntryIds, preview, storedLines };
 }
 
 async function loadAnnualUsage(database, billingClientId, startDate, endDate, entries = [], extraYears = []) {
@@ -1232,6 +1513,14 @@ async function loadDraftPreview(database, id, { persistLegacySnapshots = false }
     let entries = sourceEntries.map(mapEntry).map((entry) =>
       billableOverrides.has(String(entry.id)) ? { ...entry, isBillable: billableOverrides.get(String(entry.id)) } : entry
     );
+    const rateOverrides = await loadQuoteRateOverrides(database, id);
+    entries = entries.map((entry) => rateOverrides.has(String(entry.id))
+      ? {
+          ...entry,
+          originalUserRate: Number(entry.originalUserRate ?? entry.userRate ?? 0),
+          userRate: rateOverrides.get(String(entry.id))
+        }
+      : entry);
     entries = await backfillMissingTaskNames(database, entries);
     entries = applySnapshottedEntryRates(entries, linesResult.rows);
     const serviceOverrides = await loadQuoteServiceOverrides(database, id);
@@ -2341,10 +2630,11 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
           throw error;
         }
 
+        const service = serviceId ? servicesById.get(serviceId) : null;
         const quantityHours = roundHours(toEditableNumber(line.quantityHours ?? 1, "Hours / Qty."));
         const unitAmount = roundMoney(toEditableNumber(line.unitAmount ?? 0, "Rate / Fee"));
-        const annualYear = serviceId ? toAnnualYear(line.annualYear) : null;
-        const service = serviceId ? servicesById.get(serviceId) : null;
+        const annualYear = service?.annualInvoiceEligible ? toAnnualYear(line.annualYear) : null;
+        assertAnnualServiceYear(service, annualYear);
         const taskName = String(line.taskName || line.description || "Manual row").trim();
         const description = String(line.description || "").trim();
         const comments = String(line.comments || "").trim();
@@ -2526,16 +2816,25 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
         };
       }
       assertEditableQuoteLinePatch(line);
+      if (currentLine.sourceType !== "manual" && Object.hasOwn(line, "unitAmount")) {
+        sourceSnapshot.rateSource = "line";
+      }
       const discount = Object.hasOwn(line, "discount") ? toDiscount(line.discount) : Number(currentLine.discount || 0);
       const serviceId = Object.hasOwn(line, "serviceId") ? compactText(line.serviceId) || null : currentLine.serviceId;
-      const annualYear = serviceId && Object.hasOwn(line, "annualYear") ? toAnnualYear(line.annualYear) : serviceId ? currentLine.annualYear : null;
       if (serviceId && !servicesById.has(serviceId)) {
         const error = new Error("Choose a valid standardized service.");
         error.statusCode = 400;
         throw error;
       }
       const serviceWasSubmitted = Object.hasOwn(line, "serviceId");
-      if (serviceWasSubmitted) {
+      const annualYearWasSubmitted = Object.hasOwn(line, "annualYear");
+      const service = serviceId ? servicesById.get(serviceId) : null;
+      const annualYear = service?.annualInvoiceEligible
+        ? (annualYearWasSubmitted ? toAnnualYear(line.annualYear) : currentLine.annualYear)
+        : null;
+      const serviceOverrideWasSubmitted = serviceWasSubmitted || annualYearWasSubmitted;
+      if (serviceOverrideWasSubmitted) assertAnnualServiceYear(service, annualYear);
+      if (serviceOverrideWasSubmitted) {
         const entryIds = sourceTimeEntryIds(currentLine.sourceTimeEntryIds);
         if (entryIds.length) {
           serviceOverrideEvents.push({
@@ -2664,111 +2963,14 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
         status: currentPreview.clientStatus
       });
 
-      const existingLinesResult = await database.query(
-        `
-          select
-            line_order as "lineOrder",
-            source_type as "sourceType",
-            source_time_entry_ids as "sourceTimeEntryIds",
-            annual_year as "annualYear",
-            task_name as "taskName",
-            description,
-            service_id as "serviceId",
-            account_code as "accountCode",
-            item_code as "itemCode",
-            tax_type as "taxType",
-            quantity_hours::float8 as "quantityHours",
-            unit_amount::float8 as "unitAmount",
-            amount::float8 as amount,
-            annual_covered as "annualCovered",
-            include_in_xero as "includeInXero",
-            is_billable as "isBillable",
-            discount::float8 as discount,
-            warnings,
-            comments,
-            source_snapshot as "sourceSnapshot",
-            original_task_name as "originalTaskName",
-            task_name_origin as "taskNameOrigin",
-            task_name_prompt_version as "taskNamePromptVersion",
-            task_name_updated_by as "taskNameUpdatedBy",
-            task_name_updated_at as "taskNameUpdatedAt"
-          from quote_lines
-          where quote_preview_id = $1
-          order by line_order, id
-        `,
-        [id]
-      );
-
-      const entriesResult = await loadPreviewSourceEntries(database, billingClient, currentPreview.periodStart, currentPreview.periodEnd);
-      const billableOverrides = await loadQuoteBillableOverrides(database, id);
-      let entries = entriesResult.map(mapEntry).map((entry) =>
-        billableOverrides.has(String(entry.id))
-          ? { ...entry, isBillable: billableOverrides.get(String(entry.id)) }
-          : entry
-      );
-      entries = await backfillMissingTaskNames(database, entries);
-      entries = applySnapshottedEntryRates(entries, existingLinesResult.rows);
-
-      const serviceOverrides = await loadQuoteServiceOverrides(database, id);
-      const annualUsage = await loadAnnualUsage(
+      const { preview } = await rebuildStoredDraftPreview({
+        billingClient,
         database,
-        billingClient.id,
-        currentPreview.periodStart,
-        currentPreview.periodEnd,
-        entries,
-        serviceOverrides.map((override) => override.annualYear).filter(Boolean)
-      );
-      const preview = applyExistingLineSettings(
-        buildAggregatedQuotePreview({
-          annualUsage,
-          billingClient,
-          entries,
-          periodEnd: currentPreview.periodEnd,
-          periodStart: currentPreview.periodStart,
-          serviceOverrides,
-          services
-        }),
-        existingLinesResult.rows,
+        periodEnd: currentPreview.periodEnd,
+        periodStart: currentPreview.periodStart,
+        previewId: id,
         services
-      );
-      const manualLines = existingLinesResult.rows
-        .filter((line) => line.sourceType === "manual")
-        .map((line, index) => ({
-          accountCode: line.accountCode || billingClient.accountCode || "70330001",
-          amount: Number(line.amount || 0),
-          annualCovered: false,
-          annualYear: line.annualYear || null,
-          comments: line.comments || "",
-          description: line.description || "",
-          discount: Number(line.discount || 0),
-          includeInXero: line.includeInXero !== false,
-          isBillable: line.isBillable !== false,
-          itemCode: line.itemCode || "",
-          lineOrder: index + 1,
-          quantityHours: Number(line.quantityHours || 0),
-          serviceId: line.serviceId || null,
-          sourceTimeEntryIds: sourceTimeEntryIds(line.sourceTimeEntryIds),
-          sourceType: "manual",
-          taskName: line.taskName || line.description || "Manual row",
-          originalTaskName: line.originalTaskName || line.taskName || line.description || "Manual row",
-          taskNameOrigin: line.taskNameOrigin || "manual",
-          taskNamePromptVersion: line.taskNamePromptVersion || "",
-          taskNameUpdatedAt: line.taskNameUpdatedAt || null,
-          taskNameUpdatedBy: line.taskNameUpdatedBy || null,
-          taxType: line.taxType || billingClient.taxType,
-          unitAmount: Number(line.unitAmount || 0),
-          warnings: line.warnings || []
-        }));
-      if (manualLines.length) {
-        preview.lines = [...manualLines, ...preview.lines].map((line, index) => ({ ...line, lineOrder: index + 1 }));
-        preview.totals = {
-          ...preview.totals,
-          amount: roundMoney(preview.lines.reduce((sum, line) => sum + Number(line.amount || 0), 0)),
-          lineCount: preview.lines.length,
-          totalHours: roundHours(preview.lines.reduce((sum, line) => sum + Number(line.quantityHours || 0), 0)),
-          billedHours: roundHours(preview.lines.reduce((sum, line) => sum + (line.isBillable ? Number(line.quantityHours || 0) : 0), 0))
-        };
-      }
+      });
 
       await database.query("delete from quote_lines where quote_preview_id = $1", [id]);
       const savedLines = await insertQuoteLines(database, id, preview.lines);
@@ -2929,13 +3131,11 @@ export async function updateQuotePreviewMetadata(id, input = {}, actor = {}) {
   }
 }
 
-export async function updateQuotePreviewTimeEntryBillable(id, input = {}, actor = {}) {
-  const entryIds = requestedTimeEntryIds(input);
-  if (!entryIds.length || typeof input.isBillable !== "boolean") {
-    const error = new Error("Choose one or more source time entries and a billable state.");
-    error.statusCode = 400;
-    throw error;
-  }
+async function updateQuotePreviewTimeEntryOverrides(id, input = {}, actor = {}, overrides = {}) {
+  const billableChanges = overrides.billableChanges instanceof Map ? overrides.billableChanges : new Map();
+  const rateChanges = overrides.rateChanges instanceof Map ? overrides.rateChanges : new Map();
+  const entryIds = [...new Set([...billableChanges.keys(), ...rateChanges.keys()].map(String))];
+  if (!entryIds.length) throw draftError("Choose one or more source time entries to update.", 400, "DRAFT_SOURCE_ENTRY_REQUIRED");
 
   const pool = getDatabasePool();
   if (!pool) {
@@ -3014,29 +3214,6 @@ export async function updateQuotePreviewTimeEntryBillable(id, input = {}, actor 
       status: previewRow.clientStatus
     });
 
-    const existingLinesResult = await database.query(
-      `
-        select
-          task_name as "taskName",
-          description,
-          service_id as "serviceId",
-          item_code as "itemCode",
-          annual_covered as "annualCovered",
-          is_billable as "isBillable",
-          discount::float8 as discount,
-          comments,
-          source_snapshot as "sourceSnapshot",
-          original_task_name as "originalTaskName",
-          task_name_origin as "taskNameOrigin",
-          task_name_prompt_version as "taskNamePromptVersion",
-          task_name_updated_by as "taskNameUpdatedBy",
-          task_name_updated_at as "taskNameUpdatedAt"
-        from quote_lines
-        where quote_preview_id = $1
-      `,
-      [id]
-    );
-
     const servicesResult = await database.query(
       `
         select
@@ -3052,105 +3229,46 @@ export async function updateQuotePreviewTimeEntryBillable(id, input = {}, actor 
       `
     );
 
-    const entriesResult = await database.query(
-      `
-        select
-          entry.id,
-          entry.logged_on::text as "loggedOn",
-          entry.minutes,
-          entry.hours::float8 as hours,
-          entry.is_billable as "isBillable",
-          entry.user_id as "userId",
-          entry.project_id as "projectId",
-          entry.task_id as "taskId",
-          entry.task_name as "taskName",
-          entry.description,
-          entry.teamwork_invoice_id as "teamworkInvoiceId",
-          entry.sync_run_id as "syncRunId",
-          person.name as "userName",
-          person.user_rate::float8 as "userRate"
-        from teamwork_time_entries entry
-        left join teamwork_users person on person.id = entry.user_id
-        where entry.project_id = $1
-          and entry.logged_on between $2 and $3
-          and coalesce(nullif(trim(entry.teamwork_invoice_id), ''), '') = ''
-        order by entry.logged_on, entry.task_name, entry.description, entry.id
-      `,
-      [billingClient.teamworkProjectId, previewRow.periodStart, previewRow.periodEnd]
-    );
-
-    const availableEntryIds = new Set(entriesResult.rows.map((row) => String(row.id)));
-    if (entryIds.some((entryId) => !availableEntryIds.has(entryId))) {
-      const error = new Error("One or more source time entries are not part of this document preview.");
-      error.statusCode = 404;
-      throw error;
-    }
-
-    const overrideEventsResult = await database.query(
-      `
-        select metadata
-        from quote_events
-        where quote_preview_id = $1
-          and action = 'time_entry_billable_override'
-        order by created_at, id
-      `,
-      [id]
-    );
-    const billableOverrides = new Map();
-    for (const event of overrideEventsResult.rows) {
-      const sourceTimeEntryId = compactText(event.metadata?.sourceTimeEntryId);
-      if (!sourceTimeEntryId || typeof event.metadata?.isBillable !== "boolean") continue;
-      billableOverrides.set(sourceTimeEntryId, event.metadata.isBillable);
-    }
-    for (const entryId of entryIds) billableOverrides.set(entryId, input.isBillable);
-
-    let entries = entriesResult.rows.map(mapEntry).map((entry) =>
-      billableOverrides.has(String(entry.id))
-        ? { ...entry, isBillable: billableOverrides.get(String(entry.id)) }
-        : entry
-    );
-    entries = await backfillMissingTaskNames(database, entries);
-    entries = applySnapshottedEntryRates(entries, existingLinesResult.rows);
-
     const services = servicesResult.rows.map(mapService);
-    const serviceOverrides = await loadQuoteServiceOverrides(database, id);
-    const annualUsage = await loadAnnualUsage(
+    const { preview } = await rebuildStoredDraftPreview({
+      billingClient,
+      billableChanges,
       database,
-      billingClient.id,
-      previewRow.periodStart,
-      previewRow.periodEnd,
-      entries,
-      serviceOverrides.map((override) => override.annualYear).filter(Boolean)
-    );
-    const preview = applyExistingLineSettings(
-      buildAggregatedQuotePreview({
-        annualUsage,
-        billingClient,
-        entries,
-        periodEnd: previewRow.periodEnd,
-        periodStart: previewRow.periodStart,
-        serviceOverrides,
-        services
-      }),
-      existingLinesResult.rows,
+      periodEnd: previewRow.periodEnd,
+      periodStart: previewRow.periodStart,
+      previewId: id,
+      rateChanges,
       services
-    );
+    });
 
     await database.query("delete from quote_lines where quote_preview_id = $1", [id]);
     const savedLines = await insertQuoteLines(database, id, preview.lines);
 
-    await database.query(
-      `
-        insert into quote_events (quote_preview_id, user_id, action, metadata)
-        select
-          $1,
-          $2,
-          'time_entry_billable_override',
-          jsonb_build_object('isBillable', $3::boolean, 'sourceTimeEntryId', source_entry_id)
-        from unnest($4::text[]) as source_entry_id
-      `,
-      [id, access.userId, input.isBillable, entryIds]
-    );
+    if (billableChanges.size) {
+      const billableEntryIds = [...billableChanges.keys()];
+      await database.query(
+        `
+          insert into quote_events (quote_preview_id, user_id, action, metadata)
+          select
+            $1,
+            $2,
+            'time_entry_billable_override',
+            jsonb_build_object('isBillable', $3::boolean, 'sourceTimeEntryId', source_entry_id)
+          from unnest($4::text[]) as source_entry_id
+        `,
+        [id, access.userId, billableChanges.get(billableEntryIds[0]), billableEntryIds]
+      );
+    }
+
+    for (const [entryId, userRate] of rateChanges) {
+      await database.query(
+        `
+          insert into quote_events (quote_preview_id, user_id, action, metadata)
+          values ($1, $2, 'time_entry_rate_override', $3)
+        `,
+        [id, access.userId, JSON.stringify({ sourceTimeEntryId: entryId, userRate })]
+      );
+    }
 
     await database.query(
       `
@@ -3192,6 +3310,27 @@ export async function updateQuotePreviewTimeEntryBillable(id, input = {}, actor 
   } finally {
     database.release();
   }
+}
+
+export async function updateQuotePreviewTimeEntryBillable(id, input = {}, actor = {}) {
+  const entryIds = requestedTimeEntryIds(input);
+  if (!entryIds.length || typeof input.isBillable !== "boolean") {
+    throw draftError("Choose one or more source time entries and a billable state.", 400, "DRAFT_BILLABLE_STATE_REQUIRED");
+  }
+  return updateQuotePreviewTimeEntryOverrides(id, input, actor, {
+    billableChanges: new Map(entryIds.map((entryId) => [entryId, input.isBillable]))
+  });
+}
+
+export async function updateQuotePreviewTimeEntryRates(id, input = {}, actor = {}) {
+  const entryIds = requestedTimeEntryIds(input);
+  const userRate = roundMoney(toEditableNumber(input.userRate, "Rate"));
+  if (!entryIds.length) {
+    throw draftError("Choose one or more source time entries and a rate.", 400, "DRAFT_ENTRY_RATE_REQUIRED");
+  }
+  return updateQuotePreviewTimeEntryOverrides(id, input, actor, {
+    rateChanges: new Map(entryIds.map((entryId) => [entryId, userRate]))
+  });
 }
 
 export async function sendQuotePreviewToXero(id, input = {}, actor = {}, internal = {}) {

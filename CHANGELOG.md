@@ -6,6 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-05
+
+### Added
+
+- Draft and archived-document lists now show when each draft was created, while active drafts show the date and time of the latest edit beneath the last editor.
+- Draft task rates can be applied to every underlying time entry, then refined per entry while the task rate automatically recalculates as an hours-weighted average.
+
+### Fixed
+
+- Draft task hours, rates, discounts, wording, comments, item codes, accounting fields, and manual rows now survive later billability and standardized-service changes.
+- Existing drafts remain isolated from newly synchronized Teamwork entries, and removed task rows no longer return during a draft rebuild.
+- Stale browser responses can no longer repaint newer draft state; version conflicts now stop editing and offer an explicit reload of the latest draft.
+- Manually assigned annual services now require an explicit year, always honor that selection over task-title dates, and classify years without prepaid allowance as fully invoiceable overflow.
+- Closing and reopening the AI task-name review now restores generated suggestions, manual wording changes, and selections instead of generating everything again.
+
 ## [0.10.0] - 2026-08-04
 
 - Allow invoice wording to be entered manually when AI cannot suggest a replacement task name.

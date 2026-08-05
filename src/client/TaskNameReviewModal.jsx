@@ -12,10 +12,12 @@ export default function TaskNameReviewModal({
   error = "",
   loading = false,
   model = "",
+  open = false,
   onApply,
   onClose,
   onRegenerate,
   onRetry,
+  onStartOver,
   progress = { completed: 0, label: "", total: 0 },
   promptVersion = "",
   suggestions = [],
@@ -58,12 +60,14 @@ export default function TaskNameReviewModal({
   }, [suggestions]);
 
   useEffect(() => {
+    if (!open) return undefined;
     previousFocusRef.current = document.activeElement;
     closeButtonRef.current?.focus();
     return () => previousFocusRef.current?.focus?.();
-  }, []);
+  }, [open]);
 
   useEffect(() => {
+    if (!open) return undefined;
     function handleKeyDown(event) {
       if (event.key === "Escape" && !applying) onClose();
       if (event.key !== "Tab") return;
@@ -81,7 +85,7 @@ export default function TaskNameReviewModal({
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [applying, onClose]);
+  }, [applying, onClose, open]);
 
   const selectedRows = useMemo(() => suggestions
     .filter((item) => selected.has(item.lineId))
@@ -111,6 +115,8 @@ export default function TaskNameReviewModal({
     setDrafts((current) => ({ ...current, [item.lineId]: item.currentTaskName }));
     toggleSelected(item.lineId, false);
   }
+
+  if (!open) return null;
 
   return (
     <div className="modal-backdrop task-name-review-backdrop" role="presentation">
@@ -156,6 +162,7 @@ export default function TaskNameReviewModal({
             <div className="task-name-review-bulk-actions">
               <button disabled={applying || loading || !changedRows.length} onClick={() => setSelected(new Set(changedRows.map((item) => item.lineId)))} type="button">Select all changes</button>
               <button disabled={applying || loading || !selected.size} onClick={() => setSelected(new Set())} type="button">Deselect all</button>
+              <button disabled={applying || loading} onClick={onStartOver} type="button"><RefreshCw size={14} /> Start over</button>
             </div>
             <label className="task-name-review-filter">
               <input

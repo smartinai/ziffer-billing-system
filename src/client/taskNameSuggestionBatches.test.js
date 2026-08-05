@@ -1,11 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  matchesTaskNameReview,
   mergeTaskNameSuggestions,
   remainingTaskNameLineIds,
   TASK_NAME_SUGGESTION_BATCH_SIZE,
   taskNameSuggestionBatches
 } from "./taskNameSuggestionBatches.js";
+
+test("task-name review resumes only for the same ordered task set", () => {
+  assert.equal(matchesTaskNameReview(["line-1", "line-2"], ["line-1", "line-2"]), true);
+  assert.equal(matchesTaskNameReview(["line-1", "line-1", "line-2"], ["line-1", "line-2"]), true);
+  assert.equal(matchesTaskNameReview(["line-1", "line-2"], ["line-2", "line-1"]), false);
+  assert.equal(matchesTaskNameReview(["line-1"], ["line-1", "line-2"]), false);
+  assert.equal(matchesTaskNameReview([], []), false);
+});
 
 test("task-name suggestions are split into sequential batches of 15", () => {
   const lineIds = Array.from({ length: 32 }, (_, index) => `line-${index + 1}`);
