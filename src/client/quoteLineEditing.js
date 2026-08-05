@@ -48,3 +48,31 @@ export function hasQuoteLineValueOverride(line = {}, field) {
   if (sourceValue === null) return false;
   return Math.abs(sourceValue - Number(line[field] || 0)) > 0.00005;
 }
+
+function quoteTaskIdentity(line = {}) {
+  const taskId = String(line.taskId || "").trim();
+  if (taskId) return `task:${taskId}`;
+  const taskName = String(line.originalTaskName || line.taskName || line.description || "").trim().toLowerCase();
+  return taskName ? `name:${taskName}` : "";
+}
+
+export function sourceEntryIdsForQuoteTask(lines = [], targetLine = {}) {
+  if (targetLine.sourceType === "manual") return [];
+  const targetIdentity = quoteTaskIdentity(targetLine);
+  const matchingLines = targetIdentity
+    ? lines.filter((line) => line.sourceType !== "manual" && quoteTaskIdentity(line) === targetIdentity)
+    : [targetLine];
+  return [...new Set(matchingLines.flatMap((line) => [
+    ...(Array.isArray(line.sourceTimeEntryIds) ? line.sourceTimeEntryIds : []),
+    ...(Array.isArray(line.entries) ? line.entries.map((entry) => entry?.id) : [])
+  ]).map((entryId) => String(entryId || "").trim()).filter(Boolean))];
+}
+
+export function sourceRateForQuoteEntry(entry = {}) {
+  const originalRate = Number(entry.originalUserRate);
+  return Number.isFinite(originalRate) ? originalRate : Number(entry.userRate || 0);
+}
+
+export function hasQuoteEntryRateOverride(entry = {}) {
+  return Math.abs(sourceRateForQuoteEntry(entry) - Number(entry.userRate || 0)) > 0.00005;
+}

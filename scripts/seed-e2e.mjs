@@ -81,11 +81,18 @@ try {
      returning id`
   );
   const service = await pool.query("select id from standard_services where service_key = 'value_added_tax'");
+  const filingService = await pool.query("select id from standard_services where service_key = 'filing_correspondence'");
   await pool.query(
     `insert into annual_invoice_usage (
        billing_client_id, service_id, source_service_name, max_hours, used_hours, for_year, active
      ) values ($1, $2, 'VAT / Value added tax', 0.10, 0, 2026, true)`,
     [client.rows[0].id, service.rows[0].id]
+  );
+  await pool.query(
+    `insert into annual_invoice_usage (
+       billing_client_id, service_id, source_service_name, max_hours, used_hours, for_year, active
+     ) values ($1, $2, 'Filing / Correspondence', 1, 0, 2026, true)`,
+    [client.rows[0].id, filingService.rows[0].id]
   );
   await pool.query("commit");
   console.log("Seeded deterministic E2E users and VAT reconciliation fixture.");

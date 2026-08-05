@@ -300,6 +300,19 @@ function annualCoverageForEntry({ annualUsageByKey, annualYear = null, entry, fo
   const hasExplicitAnnualYear = Number.isInteger(overrideYear);
   const requestedYear = hasExplicitAnnualYear ? overrideYear : entryYear(entry, periodEnd);
   let usage = annualUsageByKey.get(annualUsageKey(service.id, requestedYear));
+  if (forceService && hasExplicitAnnualYear && (!usage || !Number.isFinite(usage.annualHours) || usage.annualHours <= 0)) {
+    usage = {
+      annualHours: 0,
+      coverageEnd: "",
+      coverageStart: "",
+      periodSource: "",
+      previewHours: Number(usage?.previewHours || 0),
+      serviceId: service.id,
+      usageId: usage?.usageId || "",
+      usedHours: Number(usage?.usedHours || 0),
+      year: requestedYear
+    };
+  }
   if (forceService && !hasExplicitAnnualYear && (!usage || !Number.isFinite(usage.annualHours) || usage.annualHours <= 0)) {
     const serviceUsages = [...annualUsageByKey.values()]
       .filter((candidate) => candidate.serviceId === service.id)
@@ -310,7 +323,9 @@ function annualCoverageForEntry({ annualUsageByKey, annualYear = null, entry, fo
   if (!usage) return null;
   const year = Number(usage.year || requestedYear);
 
-  const annualHours = Number.isFinite(usage.annualHours) && usage.annualHours > 0 ? usage.annualHours : null;
+  const annualHours = Number.isFinite(usage.annualHours) && (usage.annualHours > 0 || forceService && hasExplicitAnnualYear)
+    ? Math.max(usage.annualHours, 0)
+    : null;
   if (annualHours === null) return null;
   const usedHoursBefore = usage.usedHours + usage.previewHours;
   const remainingBefore = Math.max(annualHours - usedHoursBefore, 0);
@@ -518,6 +533,7 @@ export function buildAggregatedQuotePreview({
           quantityHours: 0,
           rateAmount: 0,
           rateHours: 0,
+          rateSource: "entries",
           rates: new Set(),
           serviceId: service?.id || null,
           serviceKey: service?.serviceKey || "",
@@ -602,7 +618,13 @@ export function buildAggregatedQuotePreview({
         id: String(entry.id),
         isBillable,
         renderId: `${entry.id}:${partAnnualCoverage ? "prepaid" : "standard"}:${line.entries.length}`,
+        projectId: compactText(entry.projectId),
+        taskId: compactText(entry.taskId),
+        taskName: compactText(entry.taskName),
+        teamworkInvoiceId: compactText(entry.teamworkInvoiceId),
+        userId: compactText(entry.userId),
         userName: compactText(entry.userName) || "Unknown person",
+        originalUserRate: round(entry.originalUserRate ?? rate),
         userRate: round(rate),
         warnings
       });

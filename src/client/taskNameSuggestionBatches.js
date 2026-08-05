@@ -4,6 +4,14 @@ export function uniqueTaskNameLineIds(lineIds = []) {
   return [...new Set(lineIds.filter(Boolean))];
 }
 
+export function matchesTaskNameReview(currentLineIds = [], nextLineIds = []) {
+  const current = uniqueTaskNameLineIds(currentLineIds);
+  const next = uniqueTaskNameLineIds(nextLineIds);
+  return current.length > 0
+    && current.length === next.length
+    && current.every((lineId, index) => lineId === next[index]);
+}
+
 export function taskNameSuggestionBatches(lineIds = [], size = TASK_NAME_SUGGESTION_BATCH_SIZE) {
   const uniqueLineIds = uniqueTaskNameLineIds(lineIds);
   const batchSize = Math.max(1, Number(size) || TASK_NAME_SUGGESTION_BATCH_SIZE);

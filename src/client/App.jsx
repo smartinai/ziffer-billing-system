@@ -65,7 +65,8 @@ import {
   updateAccount,
   updateQuotePreview,
   updateQuoteTimeEntriesBillable,
-  updateQuoteTimeEntryBillable
+  updateQuoteTimeEntryBillable,
+  updateQuoteTimeEntryRates
 } from "./api.js";
 import { getBillingClients, getXeroReference, updateBillingClient } from "./api.js";
 import { formatAppDate, formatAppDateTime } from "./dateFormatting.js";
@@ -74,6 +75,7 @@ import ItemCodePicker from "./ItemCodePicker.jsx";
 import TeamworkSyncModal from "./TeamworkSyncModal.jsx";
 import TaskNameReviewModal from "./TaskNameReviewModal.jsx";
 import {
+  matchesTaskNameReview,
   mergeTaskNameSuggestions,
   remainingTaskNameLineIds,
   taskNameSuggestionBatches,
@@ -81,13 +83,17 @@ import {
 } from "./taskNameSuggestionBatches.js";
 import {
   hasQuoteLineHoursOverride,
+  hasQuoteEntryRateOverride,
   hasQuoteLineValueOverride,
   inlineQuoteLineDraftValue,
   inlineQuoteLineFields,
   normalizeInlineQuoteLineValue,
+  sourceEntryIdsForQuoteTask,
   sourceHoursForQuoteLine,
+  sourceRateForQuoteEntry,
   sourceValueForQuoteLine
 } from "./quoteLineEditing.js";
+import { draftResponseIsCurrent } from "../shared/draftVersions.js";
 import XeroDocumentPreviewModal from "./XeroDocumentPreviewModal.jsx";
 import { appVersionLabel } from "./version.js";
 import { mariaRoleOptions } from "../shared/mariaRoleRates.js";
@@ -839,7 +845,10 @@ function QuoteLineEditModal({ annualYears = [], currencyCode = "EUR", items = []
   const [draft, setDraft] = useState(() => quoteLineEditDraft(line));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const annualYearSelectRef = useRef(null);
   useEscapeToClose(onClose, !saving);
+  const selectedService = services.find((service) => service.id === draft.serviceId) || null;
+  const annualYearRequired = Boolean(selectedService?.annualInvoiceEligible);
   const taxRateOptions = useMemo(() => {
     const seen = new Set();
     const options = taxRates
@@ -870,15 +879,29 @@ function QuoteLineEditModal({ annualYears = [], currencyCode = "EUR", items = []
     setError("");
   }
 
+  function updateService(serviceId) {
+    setDraft((current) => ({
+      ...current,
+      annualYear: serviceId === current.serviceId ? current.annualYear : "",
+      serviceId
+    }));
+    setError("");
+  }
+
   async function handleSubmit(event) {
     event.preventDefault();
+    if (annualYearRequired && !draft.annualYear) {
+      setError("Select an annual invoice year.");
+      annualYearSelectRef.current?.focus();
+      return;
+    }
     setSaving(true);
     setError("");
 
     try {
       await onSave({
         ...draft,
-        annualYear: draft.serviceId ? draft.annualYear : "",
+        annualYear: annualYearRequired ? draft.annualYear : "",
         discount: normalizePercent(draft.discount),
         quantityHours: normalizeEditableNumber(draft.quantityHours, "Hours / Qty."),
         unitAmount: normalizeEditableNumber(draft.unitAmount, "Rate / Fee")
@@ -920,7 +943,7 @@ function QuoteLineEditModal({ annualYears = [], currencyCode = "EUR", items = []
           </label>
           <label className="settings-form-wide">
             Standardized service
-            <select value={draft.serviceId} onChange={(event) => updateDraft("serviceId", event.target.value)}>
+            <select value={draft.serviceId} onChange={(event) => updateService(event.target.value)}>
               <option value="">No standardized service</option>
               {services.map((service) => (
                 <option key={service.id} value={service.id}>
@@ -929,10 +952,18 @@ function QuoteLineEditModal({ annualYears = [], currencyCode = "EUR", items = []
               ))}
             </select>
           </label>
-          {draft.serviceId ? (
+          {annualYearRequired ? (
             <label>
               Annual invoice year
-              <select value={draft.annualYear} onChange={(event) => updateDraft("annualYear", event.target.value)}>
+              <select
+                ref={annualYearSelectRef}
+                aria-describedby={error === "Select an annual invoice year." ? "quote-line-edit-error" : undefined}
+                aria-invalid={error === "Select an annual invoice year."}
+                aria-required="true"
+                value={draft.annualYear}
+                onChange={(event) => updateDraft("annualYear", event.target.value)}
+              >
+                <option disabled value="">Select annual invoice year</option>
                 {annualYears.map((year) => (
                   <option key={year} value={year}>
                     {year}
@@ -977,9 +1008,12 @@ function QuoteLineEditModal({ annualYears = [], currencyCode = "EUR", items = []
             )}
           </label>
 
-          {error ? <p className="form-error settings-form-wide">{error}</p> : null}
-
-          <div className="settings-modal-actions">
+          <footer className="settings-modal-actions quote-line-edit-actions">
+            {error ? (
+              <p aria-live="assertive" className="form-error quote-line-edit-error" id="quote-line-edit-error" role="alert">
+                {error}
+              </p>
+            ) : null}
             <button className="secondary-action-button" disabled={saving} type="button" onClick={onClose}>
               Cancel
             </button>
@@ -987,7 +1021,7 @@ function QuoteLineEditModal({ annualYears = [], currencyCode = "EUR", items = []
               {saving ? <Loader2 className="spin" size={17} /> : <Save size={17} />}
               Save
             </button>
-          </div>
+          </footer>
         </form>
       </section>
     </div>
@@ -1097,7 +1131,10 @@ function manualQuoteLineDraft(preview = {}) {
 
 function quoteAnnualYearOptions(preview = {}, line = {}, availableYears = []) {
   const years = new Set(availableYears.map(Number).filter((year) => Number.isInteger(year) && year >= 2000 && year <= 2100));
-  years.add(new Date().getFullYear() - 1);
+  const currentYear = new Date().getFullYear();
+  years.add(currentYear - 1);
+  years.add(currentYear);
+  years.add(currentYear + 1);
   for (const value of [preview?.period?.startDate, preview?.period?.endDate, preview?.quoteDate, line?.annualYear]) {
     const year = Number(String(value || "").slice(0, 4));
     if (Number.isInteger(year) && year >= 2000 && year <= 2100) years.add(year);
@@ -2202,7 +2239,7 @@ function DraftLedgerPanel({ archived = false, onOpen, onRestore, rows = [] }) {
         <table className="quotes-table draft-ledger-table">
           <thead>
             <tr>
-              <th>Document</th><th>Client</th><th>Period</th><th>Amount</th>
+              <th>Document</th><th>Created at</th><th>Client</th><th>Period</th><th>Amount</th>
               <th>{archived ? "Archived" : "Last editor"}</th><th>Status</th>
             </tr>
           </thead>
@@ -2213,10 +2250,22 @@ function DraftLedgerPanel({ archived = false, onOpen, onRestore, rows = [] }) {
                   <button className="quote-document-link" onClick={() => onOpen?.(draft)} type="button">{draft.quoteNumber || "Untitled draft"}</button>
                   <span className="draft-document-type">{xeroDocumentTypeLabel(draft.documentType)}</span>
                 </td>
+                <td className="draft-created-at">
+                  <time dateTime={draft.createdAt}>{formattedDateTime(draft.createdAt)}</time>
+                </td>
                 <td>{draft.clientName}</td>
                 <td>{formatPeriod(draft.period?.startDate, draft.period?.endDate)}</td>
                 <td>{formatCurrencyAmount(draft.totals?.amount || 0)}</td>
-                <td>{archived ? formattedDateTime(draft.archivedAt) : draft.lastEditedBy}</td>
+                <td>
+                  {archived ? (
+                    <time dateTime={draft.archivedAt}>{formattedDateTime(draft.archivedAt)}</time>
+                  ) : (
+                    <span className="draft-last-editor">
+                      <span>{draft.lastEditedBy}</span>
+                      <time dateTime={draft.updatedAt}>{formattedDateTime(draft.updatedAt)}</time>
+                    </span>
+                  )}
+                </td>
                 <td>
                   {archived ? (
                     <button className="secondary-button compact-button" onClick={() => onRestore?.(draft)} type="button">Restore</button>
@@ -2230,7 +2279,7 @@ function DraftLedgerPanel({ archived = false, onOpen, onRestore, rows = [] }) {
                 </td>
               </tr>
             ))}
-            {!rows.length ? <tr><td className="empty-cell" colSpan="6">{archived ? "No archived drafts." : "No active drafts."}</td></tr> : null}
+            {!rows.length ? <tr><td className="empty-cell" colSpan="7">{archived ? "No archived drafts." : "No active drafts."}</td></tr> : null}
           </tbody>
         </table>
       </div>
@@ -2545,6 +2594,13 @@ function warningTone(warning) {
 }
 
 function quoteLineKey(line) {
+  const sourceIds = [...new Set([
+    ...(Array.isArray(line.sourceTimeEntryIds) ? line.sourceTimeEntryIds : []),
+    ...(Array.isArray(line.entries) ? line.entries.map((entry) => entry?.id) : [])
+  ].map((entryId) => String(entryId || "").trim()).filter(Boolean))].sort();
+  if (sourceIds.length) {
+    return `source:${sourceIds.join(",")}:${line.annualCovered ? "annual" : "standard"}:${line.serviceId || ""}:${line.annualYear || ""}`;
+  }
   return line.id || `${line.lineOrder}-${line.description}`;
 }
 
@@ -2746,6 +2802,7 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
   const [quoteTotalsBase, setQuoteTotalsBase] = useState(initialTotals);
   const [quoteWarnings, setQuoteWarnings] = useState(initialWarnings);
   const [inlineEdit, setInlineEdit] = useState(null);
+  const [entryRateEdit, setEntryRateEdit] = useState(null);
   const [lineError, setLineError] = useState("");
   const [savingLineIds, setSavingLineIds] = useState(() => new Set());
   const [savingEntryIds, setSavingEntryIds] = useState(() => new Set());
@@ -2795,6 +2852,8 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
   const [metadataError, setMetadataError] = useState("");
   const [metadataSaving, setMetadataSaving] = useState(false);
   const [saveState, setSaveState] = useState("saved");
+  const [versionConflict, setVersionConflict] = useState("");
+  const [versionConflictReloading, setVersionConflictReloading] = useState(false);
   const versionRef = useRef(Number(preview.version || 1));
   const saveQueueRef = useRef(Promise.resolve());
   const metadataTimerRef = useRef(null);
@@ -2806,7 +2865,7 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
   const lockReacquisitionRef = useRef(null);
   const pendingInlineCellRef = useRef(null);
   const inlineEditGenerationRef = useRef(0);
-  const quoteIsLocked = quoteStatus !== "preview" || ["sending", "unknown"].includes(xeroSendState);
+  const quoteIsLocked = quoteStatus !== "preview" || ["sending", "unknown"].includes(xeroSendState) || Boolean(versionConflict);
   const selectedXeroDocumentLabel = xeroDocumentTypeLabel(xeroDocumentType);
   const isDraftQuote = xeroDocumentType === "draft_quote";
   const documentNumberLabel = isDraftQuote ? "Quote number" : "Invoice number";
@@ -2818,15 +2877,20 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
   useEffect(() => {
     setOpenLineKeys(new Set());
     setInlineEdit(null);
+    setEntryRateEdit(null);
     pendingInlineCellRef.current = null;
     saveQueueRef.current = Promise.resolve();
     lastFailedOperationRef.current = null;
     lastSaveErrorRef.current = null;
     pendingSaveCountRef.current = 0;
+    setVersionConflict("");
+    setVersionConflictReloading(false);
     setTaskNameReviewOpen(false);
     setTaskNameReviewLineIds([]);
     setTaskNameSuggestions([]);
     setTaskNameSuggestionError("");
+    setAddingManualLine(false);
+    setEditingLine(null);
   }, [preview.id]);
 
   useEffect(() => {
@@ -2834,11 +2898,10 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
     setQuoteTotalsBase(preview.totals || {});
     setQuoteWarnings(preview.warnings || []);
     setLineError("");
+    setEntryRateEdit(null);
     setSavingLineIds(new Set());
     setSavingEntryIds(new Set());
     setOpenActionMenuKey("");
-    setAddingManualLine(false);
-    setEditingLine(null);
     setQuoteStatus(preview.status || "preview");
     setXeroSendState(preview.xeroSendState || "idle");
     setSendError("");
@@ -2918,8 +2981,10 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
   }
 
   function mergePreviewForParent(nextPreview = {}) {
+    if (!draftResponseIsCurrent(versionRef.current, nextPreview.version)) return false;
     if (nextPreview.version) versionRef.current = Number(nextPreview.version);
     onPreviewChange?.(nextPreview);
+    return true;
   }
 
   async function reacquireEditorLock() {
@@ -2928,10 +2993,10 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
       lockReacquisitionRef.current = acquireQuoteDraft(preview.id, editorSession)
         .then((payload) => {
           if (payload?.preview) {
-            versionRef.current = Number(payload.preview.version || versionRef.current);
             mergePreviewForParent(payload.preview);
           }
           setMetadataError("");
+          setVersionConflict("");
           lastLockRenewalRef.current = Date.now();
           return payload;
         })
@@ -2957,7 +3022,9 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
         }
       })
       .then((payload) => {
-        if (payload?.preview) mergePreviewForParent(payload.preview);
+        if (payload?.preview && !mergePreviewForParent(payload.preview)) {
+          return { ...payload, ignoredStaleResponse: true, preview: null };
+        }
         if (lastFailedOperationRef.current === operation) {
           lastFailedOperationRef.current = null;
           lastSaveErrorRef.current = null;
@@ -2965,6 +3032,9 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
         return payload;
       })
       .catch((error) => {
+        if (error.code === "DRAFT_VERSION_CONFLICT") {
+          setVersionConflict("This draft changed in another tab or window. Reload the latest version before continuing.");
+        }
         lastFailedOperationRef.current = operation;
         lastSaveErrorRef.current = error;
         throw error;
@@ -3096,6 +3166,32 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
     }
   }
 
+  async function reloadAfterVersionConflict() {
+    setVersionConflictReloading(true);
+    setMetadataError("");
+    setLineError("");
+    try {
+      const payload = await reacquireEditorLock();
+      if (payload?.preview) {
+        applyPreviewUpdate(payload.preview);
+        setMetadata({
+          expiryDate: payload.preview.expiryDate || "",
+          quoteNumber: payload.preview.quoteNumber || "",
+          quoteDate: payload.preview.quoteDate || today(),
+          reference: payload.preview.reference || ""
+        });
+      }
+      lastFailedOperationRef.current = null;
+      lastSaveErrorRef.current = null;
+      setSaveState("saved");
+      setVersionConflict("");
+    } catch (error) {
+      setMetadataError(error.message);
+    } finally {
+      setVersionConflictReloading(false);
+    }
+  }
+
   function updateMetadata(field, value) {
     const next = { ...metadata, [field]: value };
     setMetadata(next);
@@ -3142,6 +3238,64 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
     setLineError("");
   }
 
+  function activateEntryRateCell(entry) {
+    if (quoteIsLocked || savingEntryIds.has(entry.id)) return;
+    setInlineEdit(null);
+    pendingInlineCellRef.current = null;
+    setEntryRateEdit({ entryId: entry.id, value: String(Number(entry.userRate || 0)) });
+    setLineError("");
+  }
+
+  function cancelEntryRateEdit() {
+    setEntryRateEdit(null);
+    setLineError("");
+  }
+
+  async function saveEntryRateEdit() {
+    if (!entryRateEdit || !preview.id || quoteIsLocked) return false;
+    const current = entryRateEdit;
+    const entry = quoteLines
+      .flatMap((line) => line.entries || [])
+      .find((candidate) => String(candidate.id) === String(current.entryId));
+    if (!entry) {
+      cancelEntryRateEdit();
+      return false;
+    }
+
+    let userRate;
+    try {
+      userRate = normalizeInlineQuoteLineValue("unitAmount", current.value);
+    } catch (error) {
+      setLineError(error.message);
+      return false;
+    }
+
+    if (userRate === Number(entry.userRate || 0)) {
+      setEntryRateEdit(null);
+      return true;
+    }
+
+    setSavingEntryIds((ids) => new Set(ids).add(entry.id));
+    setLineError("");
+    try {
+      const payload = await runDraftMutation((lifecycle) =>
+        updateQuoteTimeEntryRates(preview.id, [entry.id], userRate, lifecycle)
+      );
+      applyPreviewUpdate(payload.preview || {});
+      setEntryRateEdit(null);
+      return true;
+    } catch (error) {
+      setLineError(error.message);
+      return false;
+    } finally {
+      setSavingEntryIds((ids) => {
+        const next = new Set(ids);
+        next.delete(entry.id);
+        return next;
+      });
+    }
+  }
+
   function adjacentInlineCell(lineId, field, direction) {
     const cells = quoteLines.flatMap((line) => inlineQuoteLineFields.map((cellField) => ({ field: cellField, line })));
     const currentIndex = cells.findIndex((cell) => cell.line.id === lineId && cell.field === field);
@@ -3173,20 +3327,40 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
       return true;
     }
 
+    const taskEntryIds = current.field === "unitAmount" && line.sourceType !== "manual"
+      ? sourceEntryIdsForQuoteTask(quoteLines, line)
+      : [];
+    if (current.field === "unitAmount" && line.sourceType !== "manual" && !taskEntryIds.length) {
+      setLineError("This task has no source time entries to update.");
+      return false;
+    }
+
     setSavingLineIds((ids) => new Set(ids).add(line.id));
+    if (taskEntryIds.length) setSavingEntryIds((ids) => new Set([...ids, ...taskEntryIds]));
     setLineError("");
     try {
-      const payload = await runDraftMutation((lifecycle) => updateQuotePreview(preview.id, {
-        ...lifecycle,
-        lines: [{
-          id: line.id,
-          [current.field]: value,
-          ...(current.field === "taskName" ? { taskNameOrigin: "manual" } : {})
-        }]
-      }));
-      mergeLinePreviewUpdate(payload.preview || {});
+      const payload = taskEntryIds.length
+        ? await runDraftMutation((lifecycle) =>
+            updateQuoteTimeEntryRates(preview.id, taskEntryIds, value, lifecycle)
+          )
+        : await runDraftMutation((lifecycle) => updateQuotePreview(preview.id, {
+            ...lifecycle,
+            lines: [{
+              id: line.id,
+              [current.field]: value,
+              ...(current.field === "taskName" ? { taskNameOrigin: "manual" } : {})
+            }]
+          }));
+      if (taskEntryIds.length) applyPreviewUpdate(payload.preview || {});
+      else mergeLinePreviewUpdate(payload.preview || {});
       const nextCell = pendingInlineCellRef.current;
-      if (nextCell) activateInlineCell(nextCell.line, nextCell.field);
+      if (nextCell) {
+        const nextLines = payload.preview?.lines || quoteLines;
+        const matchingLine = nextLines.find((candidate) => candidate.id === nextCell.line.id)
+          || nextLines.find((candidate) => quoteLineKey(candidate) === quoteLineKey(nextCell.line));
+        if (matchingLine) activateInlineCell(matchingLine, nextCell.field);
+        else setInlineEdit(null);
+      }
       else if (inlineEditGenerationRef.current === editGeneration) setInlineEdit(null);
       return true;
     } catch (error) {
@@ -3198,6 +3372,13 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
         next.delete(line.id);
         return next;
       });
+      if (taskEntryIds.length) {
+        setSavingEntryIds((ids) => {
+          const next = new Set(ids);
+          for (const entryId of taskEntryIds) next.delete(entryId);
+          return next;
+        });
+      }
     }
   }
 
@@ -3206,6 +3387,7 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
     const current = inlineEdit;
     const adjacent = adjacentInlineCell(inlineEdit.lineId, inlineEdit.field, direction);
     if (!adjacent) return saveInlineEdit();
+    pendingInlineCellRef.current = adjacent;
     const saved = await saveInlineEdit();
     if (!saved) return setInlineEdit(current);
     const targetKey = `${adjacent.line.id}:${adjacent.field}`;
@@ -3221,7 +3403,18 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
   async function saveLineEdit(line, draft) {
     if (!preview.id || !line?.id || quoteIsLocked) return;
 
+    const taskRateChanged = line.sourceType !== "manual"
+      && Number(draft.unitAmount || 0) !== Number(line.unitAmount || 0);
+    const taskEntryIds = taskRateChanged ? sourceEntryIdsForQuoteTask(quoteLines, line) : [];
+    if (taskRateChanged && !taskEntryIds.length) {
+      const error = new Error("This task has no source time entries to update.");
+      setLineError(error.message);
+      throw error;
+    }
+    const { unitAmount: draftUnitAmount, ...draftWithoutRate } = draft;
+
     setSavingLineIds((current) => new Set(current).add(line.id));
+    if (taskEntryIds.length) setSavingEntryIds((ids) => new Set([...ids, ...taskEntryIds]));
     setLineError("");
 
     try {
@@ -3229,12 +3422,18 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
         ...lifecycle,
         lines: [
           {
-            ...draft,
+            ...(taskRateChanged ? draftWithoutRate : draft),
             id: line.id
           }
         ]
       }));
       mergeLinePreviewUpdate(payload.preview || {});
+      if (taskRateChanged) {
+        const ratePayload = await runDraftMutation((lifecycle) =>
+          updateQuoteTimeEntryRates(preview.id, taskEntryIds, draftUnitAmount, lifecycle)
+        );
+        applyPreviewUpdate(ratePayload.preview || {});
+      }
     } catch (err) {
       setLineError(err.message);
       throw err;
@@ -3244,6 +3443,13 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
         next.delete(line.id);
         return next;
       });
+      if (taskEntryIds.length) {
+        setSavingEntryIds((ids) => {
+          const next = new Set(ids);
+          for (const entryId of taskEntryIds) next.delete(entryId);
+          return next;
+        });
+      }
     }
   }
 
@@ -3495,9 +3701,13 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
 
   async function openTaskNameReview(linesToReview) {
     if (!preview.id || quoteIsLocked || !taskNameAiCapability.enabled) return;
-    const lineIds = linesToReview.map((line) => line.id).filter(Boolean);
+    const lineIds = uniqueTaskNameLineIds(linesToReview.map((line) => line.id));
     if (!lineIds.length) return;
     setOpenActionMenuKey("");
+    if (matchesTaskNameReview(taskNameReviewLineIds, lineIds)) {
+      setTaskNameReviewOpen(true);
+      return;
+    }
     setTaskNameReviewLineIds(lineIds);
     setTaskNameSuggestions([]);
     setTaskNameSuggestionError("");
@@ -3507,6 +3717,22 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
     try {
       await flushPendingChanges();
       await loadTaskNameSuggestions(lineIds);
+    } catch (error) {
+      setTaskNameSuggestionError(error.message);
+      setTaskNameSuggestionLoading(false);
+    }
+  }
+
+  async function restartTaskNameReview() {
+    if (!taskNameReviewLineIds.length || taskNameSuggestionLoading || taskNameSuggestionsApplying) return;
+    setTaskNameSuggestions([]);
+    setTaskNamePromptVersion("");
+    setTaskNameSuggestionError("");
+    setTaskNameSuggestionProgress({ completed: 0, label: "Saving current draft", total: taskNameReviewLineIds.length });
+    setTaskNameSuggestionLoading(true);
+    try {
+      await flushPendingChanges();
+      await loadTaskNameSuggestions(taskNameReviewLineIds);
     } catch (error) {
       setTaskNameSuggestionError(error.message);
       setTaskNameSuggestionLoading(false);
@@ -3539,6 +3765,10 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
       }));
       mergeLinePreviewUpdate(payload.preview || {});
       setTaskNameReviewOpen(false);
+      setTaskNameReviewLineIds([]);
+      setTaskNameSuggestions([]);
+      setTaskNamePromptVersion("");
+      setTaskNameSuggestionError("");
     } catch (error) {
       setTaskNameSuggestionError(error.message);
     } finally {
@@ -3713,6 +3943,19 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
           </div>
         </dl>
 
+        {versionConflict ? (
+          <div className="draft-version-conflict" role="alert">
+            <span><strong>Newer draft version available.</strong> {versionConflict}</span>
+            <button
+              className="secondary-button compact-button"
+              disabled={versionConflictReloading}
+              onClick={reloadAfterVersionConflict}
+              type="button"
+            >
+              {versionConflictReloading ? "Reloading…" : "Reload latest"}
+            </button>
+          </div>
+        ) : null}
         {metadataError ? <p className="form-error">{metadataError}</p> : null}
         {lineError ? <p className="form-error">{lineError}</p> : null}
         {sendError ? <p className="form-error">{sendError}</p> : null}
@@ -4017,7 +4260,31 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
                                 </div>
                               </td>
                               <td>{formatHours(entry.hours)}</td>
-                              <td>{formatCurrencyAmount(entry.userRate, currencyCode)}</td>
+                              <td>
+                                <EditableQuoteCell
+                                  active={entryRateEdit?.entryId === entry.id}
+                                  ariaLabel={`Rate for ${entry.userName || "time entry"}${entry.description ? `: ${entry.description}` : ""}`}
+                                  busy={savingEntryIds.has(entry.id)}
+                                  disabled={quoteIsLocked || savingEntryIds.has(entry.id)}
+                                  draftValue={entryRateEdit?.entryId === entry.id ? entryRateEdit.value : ""}
+                                  field="unitAmount"
+                                  inputMode="decimal"
+                                  lineId={`entry-${entry.id}`}
+                                  onActivate={() => activateEntryRateCell(entry)}
+                                  onCancel={cancelEntryRateEdit}
+                                  onChange={(value) => setEntryRateEdit((current) => ({ ...current, value }))}
+                                  onCommit={() => saveEntryRateEdit()}
+                                  onMove={() => saveEntryRateEdit()}
+                                  textAlign="right"
+                                >
+                                  <span className="quote-inline-value-stack">
+                                    <span>{formatCurrencyAmount(entry.userRate, currencyCode)}</span>
+                                    {hasQuoteEntryRateOverride(entry)
+                                      ? <small>Edited from {formatCurrencyAmount(sourceRateForQuoteEntry(entry), currencyCode)}</small>
+                                      : null}
+                                  </span>
+                                </EditableQuoteCell>
+                              </td>
                               <td aria-hidden="true" />
                               <td aria-hidden="true" />
                               <td className="quote-action-cell quote-entry-action-cell">
@@ -4056,12 +4323,12 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
         </div>
       </section>
 
-      {taskNameReviewOpen ? (
-        <TaskNameReviewModal
+      <TaskNameReviewModal
           applying={taskNameSuggestionsApplying}
           error={taskNameSuggestionError}
           loading={taskNameSuggestionLoading}
           model={taskNameAiCapability.model}
+          open={taskNameReviewOpen}
           progress={taskNameSuggestionProgress}
           promptVersion={taskNamePromptVersion}
           suggestions={taskNameSuggestions}
@@ -4070,8 +4337,8 @@ function QuotePreview({ annualYears = [], editorSession, onArchive, onPreviewCha
           onClose={() => !taskNameSuggestionsApplying && setTaskNameReviewOpen(false)}
           onRegenerate={(lineId) => loadTaskNameSuggestions([lineId], { replace: true })}
           onRetry={retryTaskNameSuggestions}
+          onStartOver={restartTaskNameReview}
         />
-      ) : null}
       {xeroPreviewOpen ? (
         <XeroDocumentPreviewModal
           busy={sendingToXero || metadataSaving}
@@ -5425,6 +5692,7 @@ function Shell({ onLogout, onUserUpdated, user }) {
     }
     setCurrentDraft((current) => {
       if (!current || current.id !== nextPreview.id) return nextPreview;
+      if (!draftResponseIsCurrent(current.version, nextPreview.version)) return current;
       return {
         ...current,
         ...nextPreview,

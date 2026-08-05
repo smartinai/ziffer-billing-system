@@ -337,6 +337,16 @@ export function updateQuoteTimeEntriesBillable(previewId, entryIds, isBillable, 
   });
 }
 
+export function updateQuoteTimeEntryRates(previewId, entryIds, userRate, lifecycle = {}) {
+  if (demoMode) {
+    return Promise.resolve({ preview: null });
+  }
+  return request(`/api/billing/quote-previews/${previewId}/time-entry-rates`, {
+    body: JSON.stringify({ ...lifecycle, entryIds, userRate }),
+    method: "PATCH"
+  });
+}
+
 export function sendQuoteToXero(previewId, input = {}) {
   if (demoMode) {
     const documentType = input.documentType === "draft_quote" ? "draft_quote" : "draft_invoice";

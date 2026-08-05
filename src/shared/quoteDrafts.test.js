@@ -476,6 +476,57 @@ test("manual service overrides can use a positive annual allowance from another 
   assert.equal(overflowLine.entries[0].comment, "0.1h booked to the pre-paid part");
 });
 
+test("an explicit manual year with no prepaid allowance becomes full overflow without falling back to the task year", () => {
+  for (const selectedYearUsage of [
+    [],
+    [{ annualHours: 0, serviceId: "service-filing", usageId: "annual-filing-2027", usedHours: 0, year: 2027 }]
+  ]) {
+    const preview = buildAggregatedQuotePreview({
+      annualUsage: [
+        {
+          annualHours: 12,
+          serviceId: "service-filing",
+          usageId: "annual-filing-2026",
+          usedHours: 0,
+          year: 2026
+        },
+        ...selectedYearUsage
+      ],
+      billingClient: { ...billingClient, discount: 0 },
+      entries: [
+        {
+          date: "2026-06-30",
+          description: "June invoice preparation",
+          hours: 1.0333,
+          id: "entry-filing-manual",
+          isBillable: true,
+          taskId: "task-filing-2026",
+          taskName: "Invoice for June 2026",
+          userName: "Ada",
+          userRate: 296
+        }
+      ],
+      periodEnd: "2026-06-30",
+      periodStart: "2026-06-01",
+      serviceOverrides: [{ annualYear: 2027, entryId: "entry-filing-manual", serviceId: "service-filing" }],
+      services
+    });
+
+    assert.equal(preview.lines.length, 1);
+    assert.equal(preview.lines[0].annualCovered, false);
+    assert.equal(preview.lines[0].annualYear, 2027);
+    assert.equal(preview.lines[0].includeInXero, true);
+    assert.equal(preview.lines[0].amount, 305.86);
+    assert.equal(preview.lines[0].annualCoverage.length, 0);
+    assert.equal(preview.lines[0].annualBilling.length, 1);
+    assert.equal(preview.lines[0].annualBilling[0].annualHours, 0);
+    assert.equal(preview.lines[0].annualBilling[0].billedHours, 1.0333);
+    assert.equal(preview.lines[0].annualBilling[0].year, 2027);
+    assert.equal(preview.totals.annualCoveredHours, 0);
+    assert.equal(preview.totals.includedHours, 1.0333);
+  }
+});
+
 test("lets manual service overrides clear an automatically matched annual service", () => {
   const preview = buildAggregatedQuotePreview({
     annualUsage: [
@@ -741,4 +792,46 @@ test("does not annual-cover short service acronyms when they look like task code
   assert.equal(preview.lines[0].annualCovered, false);
   assert.equal(preview.lines[0].amount, 180);
   assert.equal(preview.totals.annualCoveredHours, 0);
+});
+
+test("calculates the task rate as an hours-weighted average of entry-rate overrides", () => {
+  const preview = buildAggregatedQuotePreview({
+    billingClient: { ...billingClient, discount: 0 },
+    entries: [
+      {
+        date: "2026-06-05",
+        description: "First entry",
+        hours: 1,
+        id: "entry-1",
+        isBillable: true,
+        originalUserRate: 300,
+        taskId: "task-1",
+        taskName: "Client work",
+        userName: "Ada",
+        userRate: 300
+      },
+      ...Array.from({ length: 4 }, (_, index) => ({
+        date: "2026-06-05",
+        description: `Entry ${index + 2}`,
+        hours: 1,
+        id: `entry-${index + 2}`,
+        isBillable: true,
+        originalUserRate: 300,
+        taskId: "task-1",
+        taskName: "Client work",
+        userName: "Ada",
+        userRate: 275
+      }))
+    ],
+    periodEnd: "2026-06-30",
+    periodStart: "2026-06-01",
+    services
+  });
+
+  assert.equal(preview.lines.length, 1);
+  assert.equal(preview.lines[0].quantityHours, 5);
+  assert.equal(preview.lines[0].unitAmount, 280);
+  assert.equal(preview.lines[0].amount, 1400);
+  assert.equal(preview.lines[0].rateSource, "entries");
+  assert.equal(preview.lines[0].entries[0].originalUserRate, 300);
 });

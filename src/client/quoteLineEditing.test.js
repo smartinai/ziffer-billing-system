@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  hasQuoteEntryRateOverride,
   hasQuoteLineHoursOverride,
   hasQuoteLineValueOverride,
   inlineQuoteLineDraftValue,
   normalizeInlineQuoteLineValue,
+  sourceEntryIdsForQuoteTask,
   sourceHoursForQuoteLine,
+  sourceRateForQuoteEntry,
   sourceValueForQuoteLine
 } from "./quoteLineEditing.js";
 
@@ -52,4 +55,30 @@ test("detects rate and discount overrides from generated draft values", () => {
 test("creates stable drafts for inline cells", () => {
   assert.equal(inlineQuoteLineDraftValue({ taskName: "Task" }, "taskName"), "Task");
   assert.equal(inlineQuoteLineDraftValue({ quantityHours: 0.25 }, "quantityHours"), "0.25");
+});
+
+test("collects every source entry for a task without crossing into another task", () => {
+  const target = {
+    entries: [{ id: "entry-1" }],
+    sourceTimeEntryIds: ["entry-1", "entry-2"],
+    sourceType: "teamwork",
+    taskId: "task-a"
+  };
+  const lines = [
+    target,
+    { entries: [{ id: "entry-2" }, { id: "entry-3" }], sourceType: "teamwork", taskId: "task-a" },
+    { entries: [{ id: "entry-4" }], sourceType: "teamwork", taskId: "task-b" },
+    { entries: [], sourceType: "manual", taskId: "task-a" }
+  ];
+
+  assert.deepEqual(sourceEntryIdsForQuoteTask(lines, target), ["entry-1", "entry-2", "entry-3"]);
+  assert.deepEqual(sourceEntryIdsForQuoteTask(lines, lines[3]), []);
+});
+
+test("detects entry-rate overrides against the immutable source rate", () => {
+  const entry = { originalUserRate: 300, userRate: 275 };
+  assert.equal(sourceRateForQuoteEntry(entry), 300);
+  assert.equal(hasQuoteEntryRateOverride(entry), true);
+  assert.equal(hasQuoteEntryRateOverride({ ...entry, userRate: 300 }), false);
+  assert.equal(sourceRateForQuoteEntry({ userRate: 250 }), 250);
 });

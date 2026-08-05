@@ -22,7 +22,8 @@ import {
   restoreQuoteDraft,
   sendQuotePreviewToXero,
   updateQuotePreviewMetadata,
-  updateQuotePreviewTimeEntryBillable
+  updateQuotePreviewTimeEntryBillable,
+  updateQuotePreviewTimeEntryRates
 } from "./quotePreviewRepository.js";
 import { suggestQuoteTaskNames, taskNameSuggestionCapability } from "./quoteTaskNameSuggestions.js";
 import { getReportingSummary, getSourceStatus, refreshStoredReportingSummary } from "./reportingService.js";
@@ -99,6 +100,36 @@ function queueBillableStateSyncToTeamwork(input) {
     });
   });
   return { status: "queued" };
+}
+
+const auditableDraftMetadataFields = ["documentType", "expiryDate", "quoteDate", "quoteNumber", "reference"];
+const auditableDraftLineFields = [
+  "accountCode",
+  "annualYear",
+  "comments",
+  "description",
+  "discount",
+  "itemCode",
+  "quantityHours",
+  "serviceId",
+  "taskName",
+  "taxType",
+  "unitAmount"
+];
+
+function quotePreviewChangedFields(body = {}) {
+  const changedFields = auditableDraftMetadataFields
+    .filter((field) => Object.hasOwn(body, field))
+    .map((field) => `document.${field}`);
+  for (const line of Array.isArray(body.lines) ? body.lines : []) {
+    if (!line) continue;
+    if (!line.id) changedFields.push("lines.add");
+    if (line.remove === true) changedFields.push("lines.remove");
+    for (const field of auditableDraftLineFields) {
+      if (Object.hasOwn(line, field)) changedFields.push(`line.${field}`);
+    }
+  }
+  return [...new Set(changedFields)].sort();
 }
 
 function parseDateRange(req, res) {
@@ -355,11 +386,13 @@ app.patch("/api/billing/quote-previews/:id", requireAuth, requireCsrf, async (re
       entityId: req.params.id,
       entityType: "quote_preview",
       metadata: {
+        changedFields: quotePreviewChangedFields(req.body),
         documentNumber: payload.preview?.quoteNumber,
         lineUpdateCount: lineUpdates.length,
         aiNamesApplied,
         manualRowsAdded,
         removedRows,
+        resultingVersion: Number(payload.preview?.version || 0) || null,
         summary: aiNamesApplied
           ? `Applied ${aiNamesApplied} AI-assisted task name${aiNamesApplied === 1 ? "" : "s"} to ${payload.preview?.quoteNumber || "document"}`
           : lineUpdates.length
@@ -410,8 +443,10 @@ app.patch("/api/billing/quote-previews/:id/time-entries/:entryId", requireAuth, 
       entityId: req.params.entryId,
       entityType: "teamwork_time_entry",
       metadata: {
+        changedFields: ["sourceEntry.isBillable"],
         isBillable: req.body?.isBillable,
         quotePreviewId: req.params.id,
+        resultingVersion: Number(payload.preview?.version || 0) || null,
         summary: `Marked time entry ${req.params.entryId} ${req.body?.isBillable ? "billable" : "unbillable"}`,
         teamworkSync
       }
@@ -478,14 +513,44 @@ app.patch("/api/billing/quote-previews/:id/time-entries", requireAuth, requireCs
       entityId: req.params.id,
       entityType: "quote_preview",
       metadata: {
+        changedFields: ["sourceEntry.isBillable"],
         entryCount: entryIds.length,
         isBillable: req.body?.isBillable,
         quotePreviewId: req.params.id,
+        resultingVersion: Number(payload.preview?.version || 0) || null,
         summary: `Marked ${entryIds.length} task time ${entryIds.length === 1 ? "entry" : "entries"} ${req.body?.isBillable ? "billable" : "unbillable"}`,
         teamworkSync
       }
     });
     res.json({ ...payload, teamworkSync });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/billing/quote-previews/:id/time-entry-rates", requireAuth, requireCsrf, async (req, res, next) => {
+  try {
+    const entryIds = Array.isArray(req.body?.entryIds) ? req.body.entryIds : [];
+    const payload = await updateQuotePreviewTimeEntryRates(req.params.id, {
+      editorSessionId: req.body?.editorSessionId,
+      entryIds,
+      userRate: req.body?.userRate,
+      version: req.body?.version
+    }, req.user);
+    await recordAuditEvent({
+      action: "time_entry_rate_update",
+      actor: req.user,
+      entityId: req.params.id,
+      entityType: "quote_preview",
+      metadata: {
+        changedFields: ["sourceEntry.userRate"],
+        entryCount: entryIds.length,
+        quotePreviewId: req.params.id,
+        resultingVersion: Number(payload.preview?.version || 0) || null,
+        summary: `Updated draft rates for ${entryIds.length} time ${entryIds.length === 1 ? "entry" : "entries"}`
+      }
+    });
+    res.json(payload);
   } catch (error) {
     next(error);
   }
